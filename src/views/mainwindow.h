@@ -5,25 +5,27 @@
 #include <QTreeWidget>
 #include <QPushButton>
 #include <QVBoxLayout>
-#include "servicemanager.h"
+#include "mainpresenter.h"
 
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 
 public:
-    MainWindow(QWidget *parent = nullptr);
+    // The View requires a Presenter to function
+    explicit MainWindow(MainPresenter *presenter, QWidget *parent = nullptr);
     ~MainWindow();
 
 private slots:
-    void refreshServiceList();
+    // Reacts to the Presenter's signal
+    void populateTable(const QList<SystemdUnit> &units);
 
 private:
+    MainPresenter *m_presenter;
     QWidget *centralWidget;
     QVBoxLayout *layout;
     QTreeWidget *serviceList;
     QPushButton *refreshBtn;
-    ServiceManager *manager;
 };
 
-#endif // MAINWINDOW_H
+#endif

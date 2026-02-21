@@ -1,16 +1,18 @@
 #include "mainwindow.h"
+#include "mainpresenter.h"
+#include "unit_model.h"
 #include <QApplication>
-#include "servicemanager.h"
 
 int main(int argc, char *argv[])
 {
     QApplication a(argc, argv);
 
-    // CRITICAL: Register the custom D-Bus types before the app starts
+    // Register types from the model
     qDBusRegisterMetaType<SystemdUnit>();
     qDBusRegisterMetaType<QList<SystemdUnit>>();
 
-    MainWindow w;
+    MainPresenter presenter;
+    MainWindow w(&presenter);
     w.show();
 
     return a.exec();

@@ -1,7 +1,6 @@
-#ifndef SERVICEMANAGER_H
-#define SERVICEMANAGER_H
+#ifndef UNIT_MODEL_H
+#define UNIT_MODEL_H
 
-#include <QObject>
 #include <QtDBus/QtDBus>
 
 struct SystemdUnit {
@@ -20,19 +19,7 @@ struct SystemdUnit {
 Q_DECLARE_METATYPE(SystemdUnit)
 Q_DECLARE_METATYPE(QList<SystemdUnit>)
 
-// <--- ADD THESE TWO LINES SO MAIN.CPP CAN SEE THEM
 QDBusArgument &operator<<(QDBusArgument &argument, const SystemdUnit &unit);
 const QDBusArgument &operator>>(const QDBusArgument &argument, SystemdUnit &unit);
 
-class ServiceManager : public QObject
-{
-    Q_OBJECT
-public:
-    explicit ServiceManager(QObject *parent = nullptr);
-    QList<SystemdUnit> getAllServices();
-
-private:
-    QDBusInterface *systemd;
-};
-
-#endif // SERVICEMANAGER_H
+#endif
