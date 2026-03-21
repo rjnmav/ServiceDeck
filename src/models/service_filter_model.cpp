@@ -14,7 +14,7 @@ void ServiceFilterModel::setNameFilter(const QString &text) {
 }
 
 void ServiceFilterModel::setActiveStateFilter(const QString &state) {
-    m_activeStateFilter = state;
+    m_activeStateFilter = state.toUpper();
     invalidateFilter();
 }
 

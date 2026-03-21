@@ -84,12 +84,14 @@ void MainPresenter::requestCreateService(const QString &fileName, const QString 
     }
 }
 
-void MainPresenter::requestUnitFileContent(const QDBusObjectPath &unitPath) {
-    const QString fragmentPath = m_dbusService->getUnitFragmentPath(unitPath);
+void MainPresenter::requestUnitFileContent(const SystemdUnit &unit) {
+    const QString fragmentPath = unit.unit_file_path.isEmpty()
+        ? m_dbusService->getUnitFragmentPath(unit.unit_path)
+        : unit.unit_file_path;
     if (fragmentPath.isEmpty()) {
         const QString msg = QStringLiteral(
             "No unit file on disk (FragmentPath empty).\n\n"
-            "D-Bus unit object: %1").arg(unitPath.path());
+            "D-Bus unit object: %1").arg(unit.unit_path.path());
         emit unitFileContentReady(msg);
         return;
     }

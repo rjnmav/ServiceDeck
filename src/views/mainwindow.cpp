@@ -52,9 +52,10 @@ void MainWindow::setupUi() {
     m_tableView->horizontalHeader()->setHighlightSections(false);
     m_tableView->setContextMenuPolicy(Qt::CustomContextMenu);
     m_tableView->sortByColumn(0, Qt::AscendingOrder);
+    m_tableView->setFocusPolicy(Qt::NoFocus);
 
     // Set sensible default column widths
-    m_tableView->setColumnWidth(0, 300);
+    m_tableView->setColumnWidth(0, 280);
     m_tableView->setColumnWidth(2, 120);
     m_tableView->setColumnWidth(3, 120);
     m_tableView->setColumnWidth(4, 120);
@@ -140,7 +141,7 @@ void MainWindow::onSelectionChanged() {
     SystemdUnit unit = m_tableModel->serviceAt(sourceIndex.row());
 
     m_detailPanel->showServiceDetails(unit);
-    m_presenter->requestUnitFileContent(unit.unit_path);
+    m_presenter->requestUnitFileContent(unit);
 }
 
 void MainWindow::onOperationCompleted(bool success, const QString &message) {
@@ -164,15 +165,15 @@ void MainWindow::showContextMenu(const QPoint &pos) {
 
     QMenu menu(this);
     menu.setObjectName("contextMenu");
-    menu.addAction("▶ Start",     this, &MainWindow::onStartClicked);
-    menu.addAction("■ Stop",      this, &MainWindow::onStopClicked);
-    menu.addAction("↻ Restart",   this, &MainWindow::onRestartClicked);
+    menu.addAction(QIcon::fromTheme("media-playback-start"), "Start",     this, &MainWindow::onStartClicked);
+    menu.addAction(QIcon::fromTheme("media-playback-stop"), "Stop",      this, &MainWindow::onStopClicked);
+    menu.addAction(QIcon::fromTheme("view-refresh"), "Restart",   this, &MainWindow::onRestartClicked);
     menu.addSeparator();
-    menu.addAction("✓ Enable",    this, &MainWindow::onEnableClicked);
-    menu.addAction("✗ Disable",   this, &MainWindow::onDisableClicked);
+    menu.addAction(QIcon::fromTheme("emblem-default"), "Enable",    this, &MainWindow::onEnableClicked);
+    menu.addAction(QIcon::fromTheme("process-stop"), "Disable",   this, &MainWindow::onDisableClicked);
     menu.addSeparator();
-    menu.addAction("🔒 Mask",     this, &MainWindow::onMaskClicked);
-    menu.addAction("🔓 Unmask",   this, &MainWindow::onUnmaskClicked);
+    menu.addAction(QIcon::fromTheme("object-locked"), "Mask",     this, &MainWindow::onMaskClicked);
+    menu.addAction(QIcon::fromTheme("object-unlocked"), "Unmask",   this, &MainWindow::onUnmaskClicked);
 
     menu.exec(m_tableView->viewport()->mapToGlobal(pos));
 }

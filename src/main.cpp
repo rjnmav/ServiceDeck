@@ -5,7 +5,7 @@
 #include <QFile>
 
 static void loadStyleSheet(QApplication &app) {
-    QFile file(":/styles/dark_theme.qss");
+    QFile file(":/styles/light_theme.qss");
     if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         app.setStyleSheet(QString::fromUtf8(file.readAll()));
         file.close();

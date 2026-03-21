@@ -26,7 +26,7 @@ QVariant ServiceTableModel::data(const QModelIndex &index, int role) const {
         case ColName:        return unit.name;
         case ColDescription: return unit.description;
         case ColActiveState: return unit.active_state.toUpper();
-        case ColSubState:    return unit.sub_state.toUpper();
+        case ColSubState:    return unit.sub_state.toCaseFolded();
         case ColEnabled:     return unit.enabled_state.toUpper();
         default:             return QVariant();
         }
@@ -38,7 +38,7 @@ QVariant ServiceTableModel::data(const QModelIndex &index, int role) const {
         if (unit.active_state == "failed")
             return QColor(0xF4, 0x43, 0x36); // Red
         if (unit.active_state == "inactive")
-            return QColor(0xFF, 0xA7, 0x26); // Yellow
+            return QColor(0x9E, 0x9E, 0x9E); // Gray
         return QColor(0xFF, 0xA7, 0x26);      // Orange (activating/deactivating)
     }
 

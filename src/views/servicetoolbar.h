@@ -7,6 +7,18 @@
 #include <QComboBox>
 #include <QCheckBox>
 #include <QAction>
+#include <QStyledItemDelegate>
+
+class ItemSpacingDelegate : public QStyledItemDelegate {
+public:
+    explicit ItemSpacingDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+        QSize size = QStyledItemDelegate::sizeHint(option, index);
+        size.setHeight(size.height() + 15); // Add spacing
+        return size;
+    }
+};
 
 class ServiceToolbar : public QToolBar
 {

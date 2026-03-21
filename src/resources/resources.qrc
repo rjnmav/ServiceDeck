@@ -1,5 +1,9 @@
 <RCC>
     <qresource prefix="/styles">
         <file>dark_theme.qss</file>
+        <file>light_theme.qss</file>
+    </qresource>
+    <qresource prefix="/assets">
+        <file>down-arrow.svg</file>
     </qresource>
 </RCC>

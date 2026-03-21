@@ -2,9 +2,12 @@
 #define SERVICEDETAILPANEL_H
 
 #include <QDockWidget>
+#include <QElapsedTimer>
 #include <QLabel>
+#include <QTimer>
 #include <QTextEdit>
 #include <QTabWidget>
+#include "systemd_dbus.h"
 #include "unit_model.h"
 
 class ServiceDetailPanel : public QDockWidget
@@ -20,6 +23,10 @@ public:
 
 private:
     void setupUi();
+    void refreshServiceLogs();
+    void refreshResourceUsage();
+    QString loadServiceLogs() const;
+    void resetResourceUsageState();
 
     QTabWidget *m_tabWidget = nullptr;
 
@@ -34,6 +41,30 @@ private:
 
     // Unit file tab
     QTextEdit *m_unitFileEdit = nullptr;
+
+    // Service log tab
+    QTextEdit *m_serviceLogEdit = nullptr;
+    QTimer *m_logRefreshTimer = nullptr;
+
+    // Resource usage tab
+    QLabel *m_runningSinceValue = nullptr;
+    QLabel *m_uptimeValue = nullptr;
+    QLabel *m_cpuUsageValue = nullptr;
+    QLabel *m_memoryUsageValue = nullptr;
+    QLabel *m_diskReadValue = nullptr;
+    QLabel *m_diskWriteValue = nullptr;
+    QLabel *m_processCountValue = nullptr;
+    QLabel *m_threadCountValue = nullptr;
+    QTimer *m_resourceRefreshTimer = nullptr;
+    SystemdDBus *m_resourceDbus = nullptr;
+    SystemdUnit m_currentUnit;
+    QElapsedTimer m_resourceElapsedTimer;
+    quint64 m_previousCpuUsageNs = 0;
+    quint64 m_previousReadBytes = 0;
+    quint64 m_previousWriteBytes = 0;
+    bool m_hasPreviousCpuSample = false;
+    bool m_hasPreviousReadSample = false;
+    bool m_hasPreviousWriteSample = false;
 };
 
 #endif // SERVICEDETAILPANEL_H

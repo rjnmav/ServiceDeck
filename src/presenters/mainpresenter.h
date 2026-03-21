@@ -30,7 +30,7 @@ public slots:
     void requestReloadDaemon();
 
     void requestCreateService(const QString &fileName, const QString &content, bool isSystem);
-    void requestUnitFileContent(const QDBusObjectPath &unitPath);
+    void requestUnitFileContent(const SystemdUnit &unit);
 
 signals:
     void serviceListReady(const QList<SystemdUnit> &units);

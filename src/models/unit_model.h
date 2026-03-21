@@ -15,8 +15,9 @@ struct SystemdUnit {
     QString job_type;
     QDBusObjectPath job_path;
 
-    // Extended fields (populated after ListUnits)
+    // Extended fields (populated after ListUnits / ListUnitFiles merge)
     QString enabled_state;
+    QString unit_file_path;
     bool is_system = false;
 };
 

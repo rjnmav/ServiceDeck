@@ -10,6 +10,24 @@ struct OperationResult {
     QString message;
 };
 
+struct ServiceResourceUsage {
+    quint64 cpu_usage_nsec = 0;
+    quint64 memory_current = 0;
+    quint64 io_read_bytes = 0;
+    quint64 io_write_bytes = 0;
+    quint64 active_enter_timestamp_usec = 0;
+    int process_count = 0;
+    int thread_count = 0;
+    bool is_active = false;
+    bool has_cpu_usage = false;
+    bool has_memory_current = false;
+    bool has_io_read_bytes = false;
+    bool has_io_write_bytes = false;
+    bool has_active_enter_timestamp = false;
+    bool has_process_count = false;
+    bool has_thread_count = false;
+};
+
 class SystemdDBus : public QObject
 {
     Q_OBJECT
@@ -23,6 +41,7 @@ public:
     QList<SystemdUnit> fetchAllServices();
     QString getUnitFileState(const QString &serviceName);
     QString getUnitFragmentPath(const QDBusObjectPath &unitObjectPath);
+    ServiceResourceUsage fetchServiceResourceUsage(const SystemdUnit &unit);
 
     OperationResult startService(const QString &serviceName);
     OperationResult stopService(const QString &serviceName);

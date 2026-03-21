@@ -16,3 +16,7 @@ target_link_libraries(ServiceDeck PRIVATE
     Qt5::Widgets
     Qt5::DBus
 )
+
+if (SERVICEDECK_HAS_SD_JOURNAL)
+    target_link_libraries(ServiceDeck PRIVATE PkgConfig::SYSTEMD)
+endif()
