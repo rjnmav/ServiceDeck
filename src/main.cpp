@@ -7,6 +7,8 @@
 #include <QLockFile>
 #include <QDir>
 #include <QMessageBox>
+#include <QIcon>
+#include <QDebug>
 
 static void loadStyleSheet(QApplication &app, const QString &theme) {
     QString qssPath = QString(":/styles/%1_theme.qss").arg(theme);
@@ -22,6 +24,16 @@ int main(int argc, char *argv[])
     QApplication a(argc, argv);
     a.setApplicationName("ServiceDeck");
     a.setOrganizationName("ServiceDeck");
+
+    // Set application window icon globally
+    QIcon appIcon(":/assets/service_deck.png");
+    if (appIcon.isNull()) {
+        appIcon = QIcon::fromTheme("system-run");
+    }
+    
+    if (!appIcon.isNull()) {
+        a.setWindowIcon(appIcon);
+    }
 
     QLockFile lockFile(QDir::tempPath() + "/servicedeck.lock");
     if (!lockFile.tryLock(100)) {
@@ -43,6 +55,7 @@ int main(int argc, char *argv[])
 
     MainPresenter presenter;
     MainWindow w(&presenter);
+    
     w.show();
 
     return a.exec();

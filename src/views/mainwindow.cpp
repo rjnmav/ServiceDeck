@@ -21,6 +21,9 @@ MainWindow::MainWindow(MainPresenter *presenter, QWidget *parent)
 {
     setWindowTitle("ServiceDeck — Systemd Service Manager");
     setMinimumSize(900, 500);
+    
+    // Set window role for better WM integration
+    setWindowRole("servicedeck-application");
 
     setupMenuBar();
     setupUi();
