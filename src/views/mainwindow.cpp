@@ -14,8 +14,8 @@ MainWindow::MainWindow(MainPresenter *presenter, QWidget *parent)
     : QMainWindow(parent), m_presenter(presenter)
 {
     setWindowTitle("ServiceDeck — Systemd Service Manager");
-    resize(1200, 750);
     setMinimumSize(900, 500);
+    showMaximized();
 
     setupUi();
     connectSignals();
@@ -55,10 +55,10 @@ void MainWindow::setupUi() {
     m_tableView->setFocusPolicy(Qt::NoFocus);
 
     // Set sensible default column widths
-    m_tableView->setColumnWidth(0, 280);
-    m_tableView->setColumnWidth(2, 120);
-    m_tableView->setColumnWidth(3, 120);
-    m_tableView->setColumnWidth(4, 120);
+    m_tableView->setColumnWidth(0, 350);
+    m_tableView->setColumnWidth(2, 150);
+    m_tableView->setColumnWidth(3, 150);
+    m_tableView->setColumnWidth(4, 150);
 
     setCentralWidget(m_tableView);
 

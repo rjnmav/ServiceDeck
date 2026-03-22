@@ -97,6 +97,23 @@ QLineEdit::placeholder {
 }
 
 /* Dropdown */
+QComboBox {
+    padding-right: 24px;
+}
+
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 24px;
+    border-left: none;
+}
+
+QComboBox::down-arrow {
+    image: url(":/assets/down-arrow.svg");
+    width: 16px;
+    height: 16px;
+}
+
 QComboBox QAbstractItemView {
     background-color: #ffffff;
     color: #2d3748;
@@ -161,15 +178,30 @@ QHeaderView::section {
 QScrollBar:vertical {
     background: transparent;
     width: 10px;
+    margin: 0px;
 }
 
 QScrollBar::handle:vertical {
     background: #cbd5e0;
     border-radius: 5px;
+    min-height: 20px;
 }
 
 QScrollBar::handle:vertical:hover {
     background: #a0aec0;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+    height: 0px;
+    border: none;
+    background: none;
+}
+
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: transparent;
 }
 
 /* ─── Tabs ─── */

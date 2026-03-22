@@ -11,5 +11,17 @@ set(CMAKE_AUTOUIC ON)
 # Find Qt5 globally
 find_package(Qt5 REQUIRED COMPONENTS Core Widgets DBus)
 
+# Find systemd (optional)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SYSTEMD IMPORTED_TARGET libsystemd)
+
+if (SYSTEMD_FOUND)
+    set(SERVICEDECK_HAS_SD_JOURNAL ON)
+    message(STATUS "systemd-journal support enabled")
+else()
+    set(SERVICEDECK_HAS_SD_JOURNAL OFF)
+    message(WARNING "systemd-journal support NOT found. Service log support will be disabled.")
+endif()
+
 # Dive into the src folder
 add_subdirectory(src)
