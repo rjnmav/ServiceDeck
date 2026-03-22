@@ -301,7 +301,9 @@ void MainWindow::onAboutClicked() {
                        "<b>ServiceDeck</b><br><br>"
                        "A modern Qt5-based desktop application for managing "
                        "systemd services on Linux.<br><br>"
-                       "Manage, monitor, and create services with ease.");
+                       "Manage, monitor, and create services with ease."
+                       "<br><br>"
+                       "Version 1.0.0<br>");
 }
 
 void MainWindow::keyPressEvent(QKeyEvent *event) {
