@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════
-   ServiceDeck — Modern Light Theme (Clean Edition)
+   ServiceDeck — Modern Light Theme
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ─── Base Colors ─── */
@@ -226,6 +226,24 @@ QTabBar::tab:hover:!selected {
 }
 
 /* ─── Menu ─── */
+QMenuBar {
+    qproperty-nativeMenuBar: false;
+    background-color: #ffffff;
+    color: #2d3748;
+    border-bottom: 1px solid #d1d9e6;
+    min-height: 30px;
+}
+
+QMenuBar::item {
+    background-color: transparent;
+    padding: 6px 12px;
+}
+
+QMenuBar::item:selected {
+    background-color: #edf2f7;
+    border-radius: 4px;
+}
+
 QMenu {
     background-color: #ffffff;
     color: #2d3748;

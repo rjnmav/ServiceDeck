@@ -39,6 +39,7 @@ public:
     QAction *createAction() const  { return m_createAction; }
 
     void setActionsEnabled(bool enabled);
+    void refreshIcons();
 
 signals:
     void searchTextChanged(const QString &text);

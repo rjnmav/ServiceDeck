@@ -1,4 +1,5 @@
 #include "servicedetailpanel.h"
+#include "../models/app_preferences.h"
 
 #include <cstdint>
 #include <QDateTime>
@@ -107,12 +108,18 @@ ServiceDetailPanel::ServiceDetailPanel(QWidget *parent)
 void ServiceDetailPanel::setupUi() {
     m_tabWidget = new QTabWidget(this);
     m_tabWidget->setObjectName("detailTabs");
+    
+    AppPreferences &prefs = AppPreferences::instance();
     m_logRefreshTimer = new QTimer(this);
-    m_logRefreshTimer->setInterval(5000);
+    m_logRefreshTimer->setInterval(prefs.logRefreshInterval());
     connect(m_logRefreshTimer, &QTimer::timeout, this, &ServiceDetailPanel::refreshServiceLogs);
+    
     m_resourceRefreshTimer = new QTimer(this);
-    m_resourceRefreshTimer->setInterval(2000);
+    m_resourceRefreshTimer->setInterval(prefs.resourceRefreshInterval());
     connect(m_resourceRefreshTimer, &QTimer::timeout, this, &ServiceDetailPanel::refreshResourceUsage);
+    
+    connect(&prefs, &AppPreferences::preferencesChanged, this, &ServiceDetailPanel::onPreferencesChanged);
+    
     m_resourceDbus = new SystemdDBus(this);
 
     // ─── Properties tab ───
@@ -465,4 +472,10 @@ void ServiceDetailPanel::resetResourceUsageState()
     m_hasPreviousReadSample = false;
     m_hasPreviousWriteSample = false;
     m_resourceElapsedTimer.invalidate();
+}
+
+void ServiceDetailPanel::onPreferencesChanged() {
+    AppPreferences &prefs = AppPreferences::instance();
+    m_logRefreshTimer->setInterval(prefs.logRefreshInterval());
+    m_resourceRefreshTimer->setInterval(prefs.resourceRefreshInterval());
 }

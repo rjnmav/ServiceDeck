@@ -2,29 +2,61 @@
 #include "servicetoolbar.h"
 #include "servicedetailpanel.h"
 #include "createservicedialog.h"
+#include "preferencesdialog.h"
 #include "service_table_model.h"
 #include "service_filter_model.h"
+#include "../services/icon_helper.h"
+#include "../models/app_preferences.h"
 #include <QHeaderView>
 #include <QStatusBar>
 #include <QMessageBox>
 #include <QMenu>
+#include <QMenuBar>
 #include <QVBoxLayout>
+#include <QApplication>
+#include <QKeyEvent>
 
 MainWindow::MainWindow(MainPresenter *presenter, QWidget *parent)
     : QMainWindow(parent), m_presenter(presenter)
 {
     setWindowTitle("ServiceDeck — Systemd Service Manager");
     setMinimumSize(900, 500);
-    showMaximized();
 
+    setupMenuBar();
     setupUi();
     connectSignals();
 
     // Initial load
     m_presenter->requestServiceList();
+    
+    showMaximized();
 }
 
 MainWindow::~MainWindow() {}
+
+void MainWindow::setupMenuBar() {
+    QMenuBar *menubar = new QMenuBar(this);
+    menubar->setNativeMenuBar(false);
+    menubar->setVisible(true);
+    setMenuBar(menubar);
+
+    QMenu *fileMenu = menubar->addMenu("&File");
+    QAction *exitAction = fileMenu->addAction("E&xit");
+    connect(exitAction, &QAction::triggered, qApp, &QCoreApplication::quit);
+
+    QMenu *editMenu = menubar->addMenu("&Edit");
+    QAction *prefsAction = editMenu->addAction("&Preferences");
+    connect(prefsAction, &QAction::triggered, this, &MainWindow::onPreferencesClicked);
+
+    QMenu *helpMenu = menubar->addMenu("&Help");
+    QAction *aboutAction = helpMenu->addAction("&About");
+    connect(aboutAction, &QAction::triggered, this, &MainWindow::onAboutClicked);
+    
+    QAction *aboutQtAction = helpMenu->addAction("About &Qt");
+    connect(aboutQtAction, &QAction::triggered, qApp, &QApplication::aboutQt);
+
+    menubar->hide();
+}
 
 void MainWindow::setupUi() {
     // ─── Toolbar ───
@@ -95,7 +127,10 @@ void MainWindow::connectSignals() {
     connect(m_toolbar->maskAction(),    &QAction::triggered, this, &MainWindow::onMaskClicked);
     connect(m_toolbar->unmaskAction(),  &QAction::triggered, this, &MainWindow::onUnmaskClicked);
     connect(m_toolbar->reloadAction(),  &QAction::triggered, m_presenter, &MainPresenter::requestReloadDaemon);
+    
+    m_toolbar->refreshAction()->setShortcut(QKeySequence::Refresh);
     connect(m_toolbar->refreshAction(), &QAction::triggered, m_presenter, &MainPresenter::requestServiceList);
+    
     connect(m_toolbar->createAction(),  &QAction::triggered, this, &MainWindow::onCreateClicked);
 
     // Toolbar search / filter
@@ -163,17 +198,22 @@ void MainWindow::showContextMenu(const QPoint &pos) {
 
     m_tableView->selectRow(index.row());
 
+    bool isDark = (AppPreferences::instance().theme() == "dark");
+    QColor neutralColor = isDark ? QColor("#e5e9f0") : QColor("#2d3748");
+    QColor successColor = isDark ? QColor("#81C784") : QColor("#2E7D32");
+    QColor dangerColor  = isDark ? QColor("#E57373") : QColor("#C62828");
+
     QMenu menu(this);
     menu.setObjectName("contextMenu");
-    menu.addAction(QIcon::fromTheme("media-playback-start"), "Start",     this, &MainWindow::onStartClicked);
-    menu.addAction(QIcon::fromTheme("media-playback-stop"), "Stop",      this, &MainWindow::onStopClicked);
-    menu.addAction(QIcon::fromTheme("view-refresh"), "Restart",   this, &MainWindow::onRestartClicked);
+    menu.addAction(IconHelper::tintedIcon("media-playback-start", successColor), "Start",     this, &MainWindow::onStartClicked);
+    menu.addAction(IconHelper::tintedIcon("media-playback-stop", dangerColor), "Stop",      this, &MainWindow::onStopClicked);
+    menu.addAction(IconHelper::tintedIcon("view-refresh", neutralColor), "Restart",   this, &MainWindow::onRestartClicked);
     menu.addSeparator();
-    menu.addAction(QIcon::fromTheme("emblem-default"), "Enable",    this, &MainWindow::onEnableClicked);
-    menu.addAction(QIcon::fromTheme("process-stop"), "Disable",   this, &MainWindow::onDisableClicked);
+    menu.addAction(IconHelper::tintedIcon("emblem-default", successColor), "Enable",    this, &MainWindow::onEnableClicked);
+    menu.addAction(IconHelper::tintedIcon("process-stop", dangerColor), "Disable",   this, &MainWindow::onDisableClicked);
     menu.addSeparator();
-    menu.addAction(QIcon::fromTheme("object-locked"), "Mask",     this, &MainWindow::onMaskClicked);
-    menu.addAction(QIcon::fromTheme("object-unlocked"), "Unmask",   this, &MainWindow::onUnmaskClicked);
+    menu.addAction(IconHelper::tintedIcon("object-locked", dangerColor), "Mask",     this, &MainWindow::onMaskClicked);
+    menu.addAction(IconHelper::tintedIcon("object-unlocked", neutralColor), "Unmask",   this, &MainWindow::onUnmaskClicked);
 
     menu.exec(m_tableView->viewport()->mapToGlobal(pos));
 }
@@ -249,4 +289,27 @@ bool MainWindow::confirmAction(const QString &action, const QString &serviceName
         QMessageBox::No
     );
     return reply == QMessageBox::Yes;
+}
+
+void MainWindow::onPreferencesClicked() {
+    PreferencesDialog dlg(this);
+    dlg.exec();
+}
+
+void MainWindow::onAboutClicked() {
+    QMessageBox::about(this, "About ServiceDeck",
+                       "<b>ServiceDeck</b><br><br>"
+                       "A modern Qt5-based desktop application for managing "
+                       "systemd services on Linux.<br><br>"
+                       "Manage, monitor, and create services with ease.");
+}
+
+void MainWindow::keyPressEvent(QKeyEvent *event) {
+    if (event->key() == Qt::Key_Alt) {
+        QMenuBar *menubar = menuBar();
+        if (menubar) {
+            menubar->setVisible(!menubar->isVisible());
+        }
+    }
+    QMainWindow::keyPressEvent(event);
 }

@@ -35,8 +35,15 @@ private slots:
     void onUnmaskClicked();
     void onCreateClicked();
 
+    void onPreferencesClicked();
+    void onAboutClicked();
+
+protected:
+    void keyPressEvent(QKeyEvent *event) override;
+
 private:
     void setupUi();
+    void setupMenuBar();
     void connectSignals();
     QString selectedServiceName() const;
     bool confirmAction(const QString &action, const QString &serviceName);

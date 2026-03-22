@@ -21,6 +21,9 @@ public:
     void setUnitFileContent(const QString &content);
     void clear();
 
+private slots:
+    void onPreferencesChanged();
+
 private:
     void setupUi();
     void refreshServiceLogs();

@@ -3,6 +3,7 @@ add_library(ViewsLib STATIC
     servicetoolbar.cpp servicetoolbar.h
     servicedetailpanel.cpp servicedetailpanel.h
     createservicedialog.cpp createservicedialog.h
+    preferencesdialog.cpp preferencesdialog.h
 )
 target_include_directories(ViewsLib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ViewsLib PRIVATE PresentersLib ServicesLib ModelsLib Qt5::Widgets)

@@ -1,4 +1,6 @@
 #include "servicetoolbar.h"
+#include "../services/icon_helper.h"
+#include "../models/app_preferences.h"
 #include <QLabel>
 #include <QAbstractItemView>
 #include <QWindow>
@@ -13,38 +15,31 @@ ServiceToolbar::ServiceToolbar(QWidget *parent)
     setupActions();
     addSeparator();
     setupSearchAndFilters();
+
+    refreshIcons();
+    connect(&AppPreferences::instance(), &AppPreferences::preferencesChanged, this, &ServiceToolbar::refreshIcons);
 }
 
 void ServiceToolbar::setupActions() {
     m_startAction   = addAction("Start");
-    m_startAction->setIcon(QIcon::fromTheme("media-playback-start"));
     m_stopAction    = addAction("Stop");
-    m_stopAction->setIcon(QIcon::fromTheme("media-playback-stop"));
     m_restartAction = addAction("Restart");
-    m_restartAction->setIcon(QIcon::fromTheme("view-refresh"));
 
     addSeparator();
 
     m_enableAction  = addAction("Enable");
-    m_enableAction->setIcon(QIcon::fromTheme("emblem-default"));
     m_disableAction = addAction("Disable");
-    m_disableAction->setIcon(QIcon::fromTheme("process-stop"));
 
     addSeparator();
 
     m_maskAction    = addAction("Mask");
-    m_maskAction->setIcon(QIcon::fromTheme("object-locked"));
     m_unmaskAction  = addAction("Unmask");
-    m_unmaskAction->setIcon(QIcon::fromTheme("object-unlocked"));
 
     addSeparator();
 
     m_reloadAction  = addAction("Reload Daemon");
-    m_reloadAction->setIcon(QIcon::fromTheme("view-refresh"));
     m_refreshAction = addAction("Refresh");
-    m_refreshAction->setIcon(QIcon::fromTheme("view-refresh"));
     m_createAction  = addAction("Create Service");
-    m_createAction->setIcon(QIcon::fromTheme("document-new"));
 
     m_startAction->setToolTip("Start the selected service");
     m_stopAction->setToolTip("Stop the selected service");
@@ -121,4 +116,22 @@ void ServiceToolbar::setActionsEnabled(bool enabled) {
     m_disableAction->setEnabled(enabled);
     m_maskAction->setEnabled(enabled);
     m_unmaskAction->setEnabled(enabled);
+}
+
+void ServiceToolbar::refreshIcons() {
+    bool isDark = (AppPreferences::instance().theme() == "dark");
+    QColor neutralColor = isDark ? QColor("#e5e9f0") : QColor("#2d3748");
+    QColor successColor = isDark ? QColor("#81C784") : QColor("#2E7D32"); // Lighter green for dark theme
+    QColor dangerColor  = isDark ? QColor("#E57373") : QColor("#C62828"); // Lighter red for dark theme
+
+    m_startAction->setIcon(IconHelper::tintedIcon("media-playback-start", successColor));
+    m_stopAction->setIcon(IconHelper::tintedIcon("media-playback-stop", dangerColor));
+    m_restartAction->setIcon(IconHelper::tintedIcon("view-refresh", neutralColor));
+    m_enableAction->setIcon(IconHelper::tintedIcon("emblem-default", successColor));
+    m_disableAction->setIcon(IconHelper::tintedIcon("process-stop", dangerColor));
+    m_maskAction->setIcon(IconHelper::tintedIcon("object-locked", dangerColor));
+    m_unmaskAction->setIcon(IconHelper::tintedIcon("object-unlocked", neutralColor));
+    m_reloadAction->setIcon(IconHelper::tintedIcon("view-refresh", neutralColor));
+    m_refreshAction->setIcon(IconHelper::tintedIcon("view-refresh", neutralColor));
+    m_createAction->setIcon(IconHelper::tintedIcon("document-new", neutralColor));
 }
