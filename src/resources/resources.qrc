@@ -5,6 +5,6 @@
     </qresource>
     <qresource prefix="/assets">
         <file>down-arrow.svg</file>
-        <file>service_deck.png</file>
+        <file>servicedeck.svg</file>
     </qresource>
 </RCC>

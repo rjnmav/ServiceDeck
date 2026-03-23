@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ServiceDeck
+GenericName=Service Manager
+Comment=Manage systemd services with a GUI
+Exec=ServiceDeck
+Icon=servicedeck
+Terminal=false
+Categories=System;Settings;Utility;Qt;
+StartupNotify=true
+Keywords=systemd;services;linux;management;

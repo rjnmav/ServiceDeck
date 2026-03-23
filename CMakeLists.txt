@@ -23,5 +23,21 @@ else()
     message(WARNING "systemd-journal support NOT found. Service log support will be disabled.")
 endif()
 
-# Dive into the src folder
 add_subdirectory(src)
+
+set(CPACK_PACKAGE_NAME "ServiceDeck")
+set(CPACK_PACKAGE_VENDOR "ServiceDeck OSS")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Professional Qt5 Service Management Tool")
+set(CPACK_PACKAGE_VERSION "1.0.0")
+set(CPACK_PACKAGE_CONTACT "Rajan Panchal <rajanp1743@gmail.com>")
+
+
+set(CPACK_GENERATOR "DEB")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Rajan Panchal <rajanp1743@gmail.com>")
+set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/rjnmav/ServiceDeck")
+set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+
+include(CPack)

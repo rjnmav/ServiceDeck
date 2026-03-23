@@ -20,3 +20,9 @@ target_link_libraries(ServiceDeck PRIVATE
 if (SERVICEDECK_HAS_SD_JOURNAL)
     target_link_libraries(ServiceDeck PRIVATE PkgConfig::SYSTEMD)
 endif()
+
+install(TARGETS ServiceDeck
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+install(FILES resources/servicedeck.desktop DESTINATION share/applications)
+install(FILES resources/servicedeck.svg DESTINATION share/icons/hicolor/scalable/apps)

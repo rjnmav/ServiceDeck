@@ -79,7 +79,7 @@ QToolBar QToolButton#qt_toolbar_ext_button:hover {
 }
 
 /* ─── Inputs ─── */
-QLineEdit, QComboBox {
+QLineEdit, QComboBox, QTextEdit {
     background-color: #ffffff;
     color: #2d3748;
     border: 1px solid #d1d9e6;
@@ -87,7 +87,7 @@ QLineEdit, QComboBox {
     padding: 6px 10px;
 }
 
-QLineEdit:focus, QComboBox:focus {
+QLineEdit:focus, QComboBox:focus,QTextEdit:focus {
     border: 1px solid #3182ce;
     background-color: #ffffff;
 }
