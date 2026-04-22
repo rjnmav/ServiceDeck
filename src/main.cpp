@@ -26,7 +26,7 @@ int main(int argc, char *argv[])
     a.setOrganizationName("ServiceDeck");
 
     // Set application window icon globally
-    QIcon appIcon(":/assets/service_deck.svg");
+    QIcon appIcon(":/assets/servicedeck.svg");
     if (appIcon.isNull()) {
         appIcon = QIcon::fromTheme("system-run");
     }
