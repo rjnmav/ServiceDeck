@@ -37,7 +37,7 @@ If you've noticed a bug or have a feature request, make one! It's generally best
 
 ## Coding Conventions
 
-ServiceDeck is built using modern C++ (C++17) and Qt5. Please adhere to the following guidelines:
+ServiceDeck is built using modern C++ (C++20) and Qt6. Please adhere to the following guidelines:
 
 * **Architecture**: The project strictly follows the **Model-View-Presenter (MVP)** pattern.
   * Keep your views (UI code) as "dumb" or passive as possible.
@@ -59,7 +59,7 @@ Any new interaction with systemd should be added to `src/services/systemd_dbus.h
 
 When reporting bugs, please include:
 1. Your Operating System and version.
-2. The version of Qt5 and systemd you are using.
+2. The version of Qt6 and systemd you are using.
 3. Detailed steps to reproduce the bug.
 4. Any relevant console output or crash logs.
 

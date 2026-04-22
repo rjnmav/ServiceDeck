@@ -6,7 +6,7 @@ add_library(ViewsLib STATIC
     preferencesdialog.cpp preferencesdialog.h
 )
 target_include_directories(ViewsLib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(ViewsLib PRIVATE PresentersLib ServicesLib ModelsLib Qt5::Widgets)
+target_link_libraries(ViewsLib PRIVATE PresentersLib ServicesLib ModelsLib Qt6::Widgets)
 
 if (SERVICEDECK_HAS_SD_JOURNAL)
     target_compile_definitions(ViewsLib PRIVATE SERVICEDECK_HAS_SD_JOURNAL=1)

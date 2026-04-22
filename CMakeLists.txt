@@ -1,15 +1,15 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 4.0)
 
 project(ServiceDeck LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-# Find Qt5 globally
-find_package(Qt5 REQUIRED COMPONENTS Core Widgets DBus)
+# Find Qt6 globally
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets DBus)
 
 # Find systemd (optional)
 find_package(PkgConfig REQUIRED)
@@ -27,7 +27,7 @@ add_subdirectory(src)
 
 set(CPACK_PACKAGE_NAME "ServiceDeck")
 set(CPACK_PACKAGE_VENDOR "ServiceDeck OSS")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Professional Qt5 Service Management Tool")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Professional Qt6 Service Management Tool")
 set(CPACK_PACKAGE_VERSION "1.0.0")
 set(CPACK_PACKAGE_CONTACT "Rajan Panchal <rajanp1743@gmail.com>")
 

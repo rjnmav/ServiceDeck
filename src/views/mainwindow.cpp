@@ -302,7 +302,7 @@ void MainWindow::onPreferencesClicked() {
 void MainWindow::onAboutClicked() {
     QMessageBox::about(this, "About ServiceDeck",
                        "<b>ServiceDeck</b><br><br>"
-                       "A modern Qt5-based desktop application for managing "
+                       "A modern Qt6-based desktop application for managing "
                        "systemd services on Linux.<br><br>"
                        "Manage, monitor, and create services with ease."
                        "<br><br>"
