@@ -5,4 +5,4 @@ add_library(ModelsLib STATIC
     app_preferences.cpp app_preferences.h
 )
 target_include_directories(ModelsLib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(ModelsLib PRIVATE Qt5::Core Qt5::DBus Qt5::Gui)
+target_link_libraries(ModelsLib PRIVATE Qt6::Core Qt6::DBus Qt6::Gui)

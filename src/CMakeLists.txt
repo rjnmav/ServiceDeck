@@ -4,7 +4,7 @@ add_subdirectory(presenters)
 add_subdirectory(views)
 
 # Qt resource file for QSS stylesheets
-qt5_add_resources(RESOURCE_FILES resources/resources.qrc)
+qt6_add_resources(RESOURCE_FILES resources/resources.qrc)
 
 add_executable(ServiceDeck main.cpp ${RESOURCE_FILES})
 
@@ -13,8 +13,8 @@ target_link_libraries(ServiceDeck PRIVATE
     PresentersLib
     ServicesLib
     ModelsLib
-    Qt5::Widgets
-    Qt5::DBus
+    Qt6::Widgets
+    Qt6::DBus
 )
 
 if (SERVICEDECK_HAS_SD_JOURNAL)

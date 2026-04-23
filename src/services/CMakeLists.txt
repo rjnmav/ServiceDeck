@@ -5,4 +5,4 @@ add_library(ServicesLib STATIC
     icon_helper.cpp icon_helper.h
 )
 target_include_directories(ServicesLib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(ServicesLib PRIVATE ModelsLib Qt5::Core Qt5::DBus Qt5::Gui)
+target_link_libraries(ServicesLib PRIVATE ModelsLib Qt6::Core Qt6::DBus Qt6::Gui)

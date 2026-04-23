@@ -9,13 +9,19 @@ ServiceFilterModel::ServiceFilterModel(QObject *parent)
 }
 
 void ServiceFilterModel::setNameFilter(const QString &text) {
+    beginFilterChange();
     m_nameFilter = text;
-    invalidateFilter();
+    endFilterChange();
+    // Deprecated: use  begin/endFilterChange() instead.
+    // invalidateFilter();
 }
 
 void ServiceFilterModel::setActiveStateFilter(const QString &state) {
+    beginFilterChange();
     m_activeStateFilter = state.toUpper();
-    invalidateFilter();
+    endFilterChange();
+    // Deprecated: use  begin/endFilterChange() instead.
+    // invalidateFilter();
 }
 
 bool ServiceFilterModel::filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const {
