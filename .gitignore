@@ -44,3 +44,21 @@ build*/
 cmake*/
 .idea/
 .vscode/
+
+# Debian packaging artifacts
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/tmp/
+debian/*.substvars
+debian/*.debhelper.log
+debian/servicedeck/
+*.build
+*.buildinfo
+*.changes
+*.deb
+*.ddeb
+*.tar.xz
+*.dsc
+obj-*/
+build/

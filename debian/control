@@ -1,0 +1,24 @@
+Source: servicedeck
+Section: utils
+Priority: optional
+Maintainer: Rajan Panchal <rajanp1743@gmail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ cmake,
+ qtbase5-dev,
+ libsystemd-dev,
+ pkg-config
+Standards-Version: 4.6.0
+Homepage: https://github.com/rjnmav/ServiceDeck
+Rules-Requires-Root: no
+
+Package: servicedeck
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends}
+Description: Qt-based systemd service manager
+ ServiceDeck is a desktop application for managing
+ and monitoring systemd services on Linux systems.
+ It provides a graphical interface for interacting
+ with system services using Qt and D-Bus.
