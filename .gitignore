@@ -1,0 +1,129 @@
+# ==========================================
+# Byte-compiled / Optimized / C Extensions
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dylib
+*.dll
+
+# ==========================================
+# Distribution / Packaging
+# ==========================================
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+*.egg
+.installed.cfg
+MANIFEST
+
+# ==========================================
+# Environments & Environment Variables
+# ==========================================
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.Python
+
+# ==========================================
+# Application Data, Databases & Logs
+# ==========================================
+*.log
+logs/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ==========================================
+# Secrets, Keys & Certificates
+# ==========================================
+*.pem
+*.key
+*.crt
+*.cert
+*.pfx
+*.p12
+
+# ==========================================
+# Testing & Code Quality / Linting
+# ==========================================
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.cover
+*.py,cover
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.hypothesis/
+.tox/
+.nox/
+.pyre/
+.pytype/
+
+# ==========================================
+# Qt / PySide GUI Artifacts
+# ==========================================
+*resources_rc.py
+*.ui.autosave
+
+# ==========================================
+# C / CMake / Native Build Artifacts
+# ==========================================
+CMakeFiles/
+CMakeCache.txt
+CMakeScripts/
+cmake_install.cmake
+compile_commands.json
+*.ninja
+.ninja_*
+CPack*.cmake
+_CPack_Packages/
+*.o
+*.a
+
+# ==========================================
+# IDEs & Text Editors
+# ==========================================
+.vscode/*
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# ==========================================
+# Operating System Files
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
