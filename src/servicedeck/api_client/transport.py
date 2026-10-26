@@ -159,6 +159,10 @@ class AsyncTransport:
         """Close the underlying HTTP async client."""
         await self._client.aclose()
 
+    async def close(self) -> None:
+        """Close alias for symmetry."""
+        await self.aclose()
+
     async def __aenter__(self) -> "AsyncTransport":
         return self
 

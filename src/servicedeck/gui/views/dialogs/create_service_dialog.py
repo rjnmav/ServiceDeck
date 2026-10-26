@@ -47,6 +47,7 @@ class CreateServiceDialog(QDialog):
         parent: Any = None,
         client: ServiceDeckClient | None = None,
         default_scope: str = "user",
+        device_id: str | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Create New Service")
@@ -54,6 +55,7 @@ class CreateServiceDialog(QDialog):
         self.setObjectName("createServiceDialog")
         self._client = client
         self._default_scope = default_scope
+        self._device_id = device_id
 
         self._setup_ui()
 
@@ -385,7 +387,9 @@ class CreateServiceDialog(QDialog):
             return
 
         def task() -> CreatedService:
-            return self._client.create_service(name=name, content=content_text, scope=scope)
+            return self._client.create_service(
+                name=name, content=content_text, scope=scope, device_id=self._device_id
+            )
 
         def on_start() -> None:
             self._create_btn.setEnabled(False)

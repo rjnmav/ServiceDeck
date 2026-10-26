@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from servicedeck.api_client import ServiceDeckClient
+from servicedeck.api_client.models.remote import RemoteDevice
 from servicedeck.api_client.models.service import (
     DaemonReloadResult,
     Service,
@@ -25,7 +26,11 @@ from servicedeck.api_client.models.service import (
 from servicedeck.gui.models.service_filter_model import ServiceFilterModel
 from servicedeck.gui.models.service_model import ServiceTableModel
 from servicedeck.gui.resources.icon_helper import IconHelper
+from servicedeck.gui.views.dialogs.add_remote_device_dialog import AddRemoteDeviceDialog
 from servicedeck.gui.views.dialogs.create_service_dialog import CreateServiceDialog
+from servicedeck.gui.views.dialogs.manage_remote_devices_dialog import (
+    ManageRemoteDevicesDialog,
+)
 from servicedeck.gui.views.dialogs.preferences_dialog import PreferencesDialog
 from servicedeck.gui.views.service_detail_panel import ServiceDetailPanel
 from servicedeck.gui.views.service_toolbar import ServiceToolbar
@@ -40,11 +45,13 @@ class MainWindow(QMainWindow):
         self.client = client
         self._current_theme = "dark"
         self._current_scope = "user"
+        self._current_device_id: str | None = None
+        self._devices: list[RemoteDevice] = []
         self._is_busy = False
         self._log_refresh_interval = 5
         self._resource_refresh_interval = 2
 
-        self.setWindowTitle("ServiceDeck — Systemd Service Manager")
+        self.setWindowTitle("ServiceDeck — Systemd Service Manager (Local)")
         self.setMinimumSize(900, 500)
         self.setWindowIcon(QIcon(":/assets/servicedeck.svg"))
 
@@ -163,6 +170,11 @@ class MainWindow(QMainWindow):
         )
         self._toolbar.system_mode_toggled.connect(self._on_system_scope_toggled)
 
+        # Host selection
+        self._toolbar.target_host_changed.connect(self._on_target_host_changed)
+        self._toolbar.add_host_requested.connect(self._on_add_host_requested)
+        self._toolbar.manage_hosts_requested.connect(self._on_manage_hosts_requested)
+
         # Table Selection
         sel_model = self._table_view.selectionModel()
         if sel_model is not None:
@@ -172,19 +184,25 @@ class MainWindow(QMainWindow):
         self._table_view.customContextMenuRequested.connect(self._show_context_menu)
 
     def _initial_load(self) -> None:
-        """Fetch scope and initial service list from backend."""
+        """Fetch scope, remote devices, and initial service list from backend."""
 
-        def task() -> tuple[str, list[Service]]:
+        def task() -> tuple[str, list[Service], list[RemoteDevice]]:
             scope_info = self.client.get_scope()
+            try:
+                devices = self.client.list_devices()
+            except Exception:
+                devices = []
             services = self.client.list_services(scope=scope_info.active_scope)
-            return scope_info.active_scope, services
+            return scope_info.active_scope, services, devices
 
-        def on_success(result: tuple[str, list[Service]]) -> None:
-            active_scope, services = result
+        def on_success(result: tuple[str, list[Service], list[RemoteDevice]]) -> None:
+            active_scope, services, devices = result
             self._current_scope = active_scope
+            self._devices = devices
             self._toolbar.system_toggle.blockSignals(True)
             self._toolbar.system_toggle.setChecked(active_scope == "system")
             self._toolbar.system_toggle.blockSignals(False)
+            self._toolbar.set_hosts(devices, self._current_device_id)
             self._populate_table(services)
             self.set_status(f"Connected to backend ({active_scope} scope)", success=True)
 
@@ -194,21 +212,26 @@ class MainWindow(QMainWindow):
         run_async_task(task, on_success=on_success, on_error=on_error)
 
     def request_service_list(self) -> None:
-        """Fetch updated service list for the current scope."""
+        """Fetch updated service list for the current scope and target host."""
         if self._is_busy:
             return
 
+        device_id = self._current_device_id
+        scope = self._current_scope
+
         def task() -> list[Service]:
-            return self.client.list_services(scope=self._current_scope)
+            return self.client.list_services(scope=scope, device_id=device_id)
 
         def on_start() -> None:
             self._is_busy = True
-            self.set_status(f"Refreshing {self._current_scope} services...")
+            host_label = self._get_host_display_name()
+            self.set_status(f"Refreshing {scope} services on {host_label}...")
 
         def on_success(services: list[Service]) -> None:
             self._is_busy = False
             self._populate_table(services)
-            self.set_status(f"Loaded {len(services)} services", success=True)
+            host_label = self._get_host_display_name()
+            self.set_status(f"Loaded {len(services)} services ({host_label})", success=True)
 
         def on_error(msg: str, exc: Any) -> None:
             self._is_busy = False
@@ -233,7 +256,9 @@ class MainWindow(QMainWindow):
         source_index = self._filter_model.mapToSource(indexes[0])
         service = self._table_model.service_at(source_index.row())
         if service:
-            self._detail_panel.show_service_details(service, scope=self._current_scope)
+            self._detail_panel.show_service_details(
+                service, scope=self._current_scope, device_id=self._current_device_id
+            )
 
     def _selected_service_name(self) -> str | None:
         indexes = self._table_view.selectionModel().selectedRows()
@@ -258,8 +283,11 @@ class MainWindow(QMainWindow):
         if not name or self._is_busy:
             return
 
+        device_id = self._current_device_id
+        scope = self._current_scope
+
         def task() -> ServiceOperationResult:
-            return fn(name, scope=self._current_scope)
+            return fn(name, scope=scope, device_id=device_id)
 
         def on_start() -> None:
             self._is_busy = True
@@ -274,7 +302,19 @@ class MainWindow(QMainWindow):
 
         def on_error(msg: str, exc: Any) -> None:
             self._is_busy = False
-            self.set_status(f"Error {op_name}ing '{name}': {msg}", success=False)
+            err_lower = msg.lower()
+            if (
+                "authentication" in err_lower
+                or "authorization" in err_lower
+                or "denied" in err_lower
+                or "not authorized" in err_lower
+            ):
+                self.set_status(
+                    f"Permission denied {op_name}ing '{name}'. Privileged operations on remote hosts require system elevation.",
+                    success=False,
+                )
+            else:
+                self.set_status(f"Error {op_name}ing '{name}': {msg}", success=False)
             self._toolbar.set_actions_enabled(True)
 
         run_async_task(task, on_start=on_start, on_success=on_success, on_error=on_error)
@@ -315,12 +355,15 @@ class MainWindow(QMainWindow):
         if self._is_busy:
             return
 
+        device_id = self._current_device_id
+        scope = self._current_scope
+
         def task() -> DaemonReloadResult:
-            return self.client.reload_daemon(scope=self._current_scope)
+            return self.client.reload_daemon(scope=scope, device_id=device_id)
 
         def on_start() -> None:
             self._is_busy = True
-            self.set_status(f"Reloading systemd daemon ({self._current_scope} scope)...")
+            self.set_status(f"Reloading systemd daemon ({scope} scope)...")
 
         def on_success(res: DaemonReloadResult) -> None:
             self._is_busy = False
@@ -334,7 +377,12 @@ class MainWindow(QMainWindow):
         run_async_task(task, on_start=on_start, on_success=on_success, on_error=on_error)
 
     def _on_create_clicked(self) -> None:
-        dlg = CreateServiceDialog(self, client=self.client, default_scope=self._current_scope)
+        dlg = CreateServiceDialog(
+            self,
+            client=self.client,
+            default_scope=self._current_scope,
+            device_id=self._current_device_id,
+        )
         if dlg.exec():
             self.request_service_list()
 
@@ -344,10 +392,16 @@ class MainWindow(QMainWindow):
             return
         self._detail_panel.clear()
 
+        device_id = self._current_device_id
+
         def task() -> tuple[str, list[Service]]:
-            scope_info = self.client.set_scope(new_scope)
-            services = self.client.list_services(scope=scope_info.active_scope)
-            return scope_info.active_scope, services
+            if device_id is None:
+                scope_info = self.client.set_scope(new_scope)
+                active_scope = scope_info.active_scope
+            else:
+                active_scope = new_scope
+            services = self.client.list_services(scope=active_scope, device_id=device_id)
+            return active_scope, services
 
         def on_start() -> None:
             self._is_busy = True
@@ -371,6 +425,69 @@ class MainWindow(QMainWindow):
             self.set_status(f"Failed to switch scope: {msg}", success=False)
 
         run_async_task(task, on_start=on_start, on_success=on_success, on_error=on_error)
+
+    def _get_host_display_name(self) -> str:
+        """Return human-readable display name of currently active host target."""
+        if self._current_device_id is None:
+            return "Local System"
+        for dev in self._devices:
+            if dev.id == self._current_device_id:
+                return f"{dev.display_name} ({dev.hostname})"
+        return f"Host ({self._current_device_id})"
+
+    def _update_window_title(self) -> None:
+        """Update window title to reflect active host target."""
+        if self._current_device_id is None:
+            self.setWindowTitle("ServiceDeck — Systemd Service Manager (Local)")
+        else:
+            host_name = self._get_host_display_name()
+            self.setWindowTitle(f"ServiceDeck — Systemd Service Manager [{host_name}]")
+
+    def _on_target_host_changed(self, device_id: str | None) -> None:
+        """Switch target host and refresh service inventory."""
+        self._current_device_id = device_id
+        self._update_window_title()
+        self._detail_panel.clear()
+        self.request_service_list()
+
+    def _on_add_host_requested(self) -> None:
+        """Show Add Remote Host dialog and switch to it upon creation."""
+        dlg = AddRemoteDeviceDialog(self, client=self.client)
+        if dlg.exec():
+            new_id = dlg.created_device.id if dlg.created_device else None
+            self._refresh_hosts_list(switch_to_id=new_id)
+
+    def _on_manage_hosts_requested(self) -> None:
+        """Show Manage Remote Hosts dialog and handle switch or update."""
+        dlg = ManageRemoteDevicesDialog(self, client=self.client)
+        dlg.exec()
+        target_id = dlg.selected_device_id if dlg.selected_device_id else self._current_device_id
+        self._refresh_hosts_list(switch_to_id=target_id)
+
+    def _refresh_hosts_list(self, switch_to_id: str | None = None) -> None:
+        """Reload remote devices list from backend and update toolbar."""
+
+        def task() -> list[RemoteDevice]:
+            return self.client.list_devices()
+
+        def on_success(devices: list[RemoteDevice]) -> None:
+            self._devices = devices
+            target_id = switch_to_id if switch_to_id is not None else self._current_device_id
+            if target_id is not None:
+                exists = any(d.id == target_id for d in devices)
+                if not exists:
+                    target_id = None
+
+            self._current_device_id = target_id
+            self._update_window_title()
+            self._toolbar.set_hosts(devices, self._current_device_id)
+            self._detail_panel.clear()
+            self.request_service_list()
+
+        def on_error(msg: str, exc: Any) -> None:
+            self.set_status(f"Failed to refresh hosts list: {msg}", success=False)
+
+        run_async_task(task, on_success=on_success, on_error=on_error)
 
     def _show_context_menu(self, pos: QPoint) -> None:
         index = self._table_view.indexAt(pos)

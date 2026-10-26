@@ -1,4 +1,4 @@
-"""Toolbar widget containing service lifecycle controls, search, and scope toggle."""
+"""Toolbar widget containing service lifecycle controls, search, scope toggle, and host selector."""
 
 from typing import Any
 
@@ -14,15 +14,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from servicedeck.api_client.models.remote import RemoteDevice
 from servicedeck.gui.resources.icon_helper import IconHelper
 
 
 class ServiceToolbar(QToolBar):
-    """Toolbar providing actions for starting, stopping, filtering, and switching service scope."""
+    """Toolbar providing actions for service management, filtering, scope, and target host selection."""
 
     search_text_changed = Signal(str)
     active_state_filter_changed = Signal(str)
     system_mode_toggled = Signal(bool)
+    target_host_changed = Signal(object)  # None for local, or device_id (str)
+    add_host_requested = Signal()
+    manage_hosts_requested = Signal()
 
     def __init__(self, parent: Any = None, is_dark: bool = True) -> None:
         super().__init__("Service Actions", parent)
@@ -32,6 +36,7 @@ class ServiceToolbar(QToolBar):
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
 
         self._is_dark = is_dark
+        self._current_device_id: str | None = None
 
         self._setup_actions()
         self.addSeparator()
@@ -82,6 +87,10 @@ class ServiceToolbar(QToolBar):
     def system_toggle(self) -> QCheckBox:
         return self._system_toggle
 
+    @property
+    def host_combo(self) -> QComboBox:
+        return self._host_combo
+
     def _setup_actions(self) -> None:
         self._start_action = self.addAction("Start")
         self._stop_action = self.addAction("Stop")
@@ -124,8 +133,8 @@ class ServiceToolbar(QToolBar):
         self._search_edit = QLineEdit(self)
         self._search_edit.setObjectName("searchEdit")
         self._search_edit.setPlaceholderText("Filter by name...")
-        self._search_edit.setMinimumWidth(200)
-        self._search_edit.setMaximumWidth(300)
+        self._search_edit.setMinimumWidth(180)
+        self._search_edit.setMaximumWidth(280)
         self._search_edit.setClearButtonEnabled(True)
         self.addWidget(self._search_edit)
 
@@ -146,8 +155,8 @@ class ServiceToolbar(QToolBar):
         self._filter_combo.addItem("Active", "active")
         self._filter_combo.addItem("Inactive", "inactive")
         self._filter_combo.addItem("Failed", "failed")
-        self._filter_combo.setMinimumWidth(100)
-        self._filter_combo.setMaximumWidth(200)
+        self._filter_combo.setMinimumWidth(90)
+        self._filter_combo.setMaximumWidth(150)
         self._filter_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.addWidget(self._filter_combo)
 
@@ -161,6 +170,81 @@ class ServiceToolbar(QToolBar):
         self.addWidget(self._system_toggle)
 
         self._system_toggle.toggled.connect(self.system_mode_toggled.emit)
+
+        self.addSeparator()
+
+        # Host Selector label & combo
+        host_label = QLabel("Host: ", self)
+        self.addWidget(host_label)
+
+        self._host_combo = QComboBox(self)
+        self._host_combo.setObjectName("hostCombo")
+        self._host_combo.setMinimumWidth(160)
+        self._host_combo.setMaximumWidth(260)
+        self._host_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._host_combo.addItem("🖥️ Local System", None)
+        self._host_combo.addItem("+ Add Remote Host...", "__add_host__")
+        self.addWidget(self._host_combo)
+
+        self._host_combo.currentIndexChanged.connect(self._on_host_combo_changed)
+
+    def set_hosts(self, devices: list[RemoteDevice], current_device_id: str | None = None) -> None:
+        """Update host dropdown options with local and remote machines."""
+        self._current_device_id = current_device_id
+        self._host_combo.blockSignals(True)
+        self._host_combo.clear()
+
+        # 1. Local
+        self._host_combo.addItem("🖥️ Local System", None)
+
+        # 2. Remote devices
+        for d in devices:
+            status_icon = "🟢" if d.connected else "⚪"
+            label = f"{status_icon} {d.display_name} ({d.hostname})"
+            self._host_combo.addItem(label, d.id)
+
+        # 3. Actions
+        self._host_combo.insertSeparator(self._host_combo.count())
+        self._host_combo.addItem("+ Add Remote Host...", "__add_host__")
+        if devices:
+            self._host_combo.addItem("⚙️ Manage Remote Hosts...", "__manage_hosts__")
+
+        # Select current
+        target_idx = 0
+        if current_device_id is not None:
+            for i in range(self._host_combo.count()):
+                if self._host_combo.itemData(i) == current_device_id:
+                    target_idx = i
+                    break
+        self._host_combo.setCurrentIndex(target_idx)
+        self._host_combo.blockSignals(False)
+
+    def _on_host_combo_changed(self, index: int) -> None:
+        data = self._host_combo.itemData(index)
+        if data == "__add_host__":
+            # Revert selection to current
+            self._restore_current_host_index()
+            self.add_host_requested.emit()
+            return
+
+        if data == "__manage_hosts__":
+            self._restore_current_host_index()
+            self.manage_hosts_requested.emit()
+            return
+
+        self._current_device_id = data
+        self.target_host_changed.emit(data)
+
+    def _restore_current_host_index(self) -> None:
+        """Keep the combo visually on the active host when action items are clicked."""
+        self._host_combo.blockSignals(True)
+        target_idx = 0
+        for i in range(self._host_combo.count()):
+            if self._host_combo.itemData(i) == self._current_device_id:
+                target_idx = i
+                break
+        self._host_combo.setCurrentIndex(target_idx)
+        self._host_combo.blockSignals(False)
 
     def _on_filter_changed(self, index: int) -> None:
         state_data = self._filter_combo.itemData(index) or ""

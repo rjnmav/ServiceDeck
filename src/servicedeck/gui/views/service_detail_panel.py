@@ -81,6 +81,7 @@ class ServiceDetailPanel(QDockWidget):
         self._client: ServiceDeckClient | None = client
         self._current_service: Service | None = None
         self._current_scope: str = "user"
+        self._current_device_id: str | None = None
 
         # Previous samples for rate/CPU calculations
         self._previous_cpu_ns: int | None = None
@@ -207,10 +208,16 @@ class ServiceDetailPanel(QDockWidget):
         elif index == 3:  # Resources
             self.refresh_resource_usage()
 
-    def show_service_details(self, service: Service, scope: str | None = None) -> None:
+    def show_service_details(
+        self,
+        service: Service,
+        scope: str | None = None,
+        device_id: str | None = None,
+    ) -> None:
         """Populate the details panel with properties for the given service."""
         self._current_service = service
         self._current_scope = scope or service.scope
+        self._current_device_id = device_id
         self.reset_resource_usage_state()
 
         self._name_val.setText(service.name)
@@ -261,9 +268,10 @@ class ServiceDetailPanel(QDockWidget):
 
         service_name = self._current_service.name
         scope = self._current_scope
+        device_id = self._current_device_id
 
         def task() -> ServiceUnitFile:
-            return self._client.get_unit_file(service_name, scope=scope)
+            return self._client.get_unit_file(service_name, scope=scope, device_id=device_id)
 
         def on_success(res: ServiceUnitFile) -> None:
             if not self._current_service or self._current_service.name != service_name:
@@ -285,9 +293,10 @@ class ServiceDetailPanel(QDockWidget):
 
         service_name = self._current_service.name
         scope = self._current_scope
+        device_id = self._current_device_id
 
         def task() -> ServiceLogs:
-            return self._client.get_logs(service_name, lines=200, scope=scope)
+            return self._client.get_logs(service_name, lines=200, scope=scope, device_id=device_id)
 
         def on_success(res: ServiceLogs) -> None:
             if not self._current_service or self._current_service.name != service_name:
@@ -316,9 +325,10 @@ class ServiceDetailPanel(QDockWidget):
 
         service_name = self._current_service.name
         scope = self._current_scope
+        device_id = self._current_device_id
 
         def task() -> ServiceResources:
-            return self._client.get_resources(service_name, scope=scope)
+            return self._client.get_resources(service_name, scope=scope, device_id=device_id)
 
         def on_success(res: ServiceResources) -> None:
             if not self._current_service or self._current_service.name != service_name:

@@ -26,6 +26,7 @@ from servicedeck.api_client.exceptions import (
     SSHAuthenticationError,
 )
 from servicedeck.api_client.models.common import HealthInfo, ScopeInfo
+from servicedeck.api_client.models.remote import RemoteConnectionInfo, RemoteDevice
 from servicedeck.api_client.models.service import (
     CreatedService,
     DaemonReloadResult,
@@ -46,6 +47,8 @@ __all__ = [
     "PolkitAgentUnavailableError",
     "RemoteAuthorizationMissingError",
     "RemoteConnectionError",
+    "RemoteConnectionInfo",
+    "RemoteDevice",
     "RemoteDeviceNotTrustedError",
     "RemoteDeviceRevokedError",
     "RemoteHostKeyChangedError",

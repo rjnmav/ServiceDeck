@@ -66,6 +66,18 @@ Interactive API documentation will be available at:
 servicedeck-gui --url http://127.0.0.1:8000
 ```
 
+**Remote Management:**
+```bash
+# Add a remote machine configuration
+servicedeck remote add srv1 192.168.1.50 --username alice
+
+# List configured remote machines
+servicedeck remote list
+
+# See complete remote guide:
+# docs/remote_connection_guide.md
+```
+
 ---
 
 ## Development & Testing

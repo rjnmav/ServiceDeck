@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from servicedeck.backend.api.router import api_router
 from servicedeck.backend.config.settings import Settings, get_settings
+from servicedeck.backend.core.remote_manager import RemoteManager
 from servicedeck.backend.core.service_manager import ServiceManager
 from servicedeck.backend.exceptions import (
     AuthenticationRequiredError,
@@ -17,14 +18,21 @@ from servicedeck.backend.exceptions import (
     InvalidServiceNameError,
     PermissionDeniedError,
     PolkitAgentUnavailableError,
+    RemoteAuthorizationMissingError,
+    RemoteConnectionError,
+    RemoteDeviceNotTrustedError,
+    RemoteDeviceRevokedError,
+    RemoteHostKeyChangedError,
     ServiceDeckError,
     ServiceNotFoundError,
     ServiceOperationError,
+    SSHAuthenticationError,
     SystemdConnectionError,
 )
 from servicedeck.backend.infrastructure.dbus.connection import DbusConnectionManager
 from servicedeck.backend.infrastructure.dbus.systemd import DbusSystemdAdapter
 from servicedeck.backend.schemas.service import ErrorDetail
+from servicedeck.remote.exceptions import RemoteProtocolError, RemoteTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +40,7 @@ logger = logging.getLogger(__name__)
 def create_app(
     settings: Settings | None = None,
     service_manager: ServiceManager | None = None,
+    remote_manager: RemoteManager | None = None,
 ) -> FastAPI:
     """Create and configure a new FastAPI application instance."""
     app_settings = settings or get_settings()
@@ -59,6 +68,7 @@ def create_app(
                 "with Polkit managing privilege escalation via D-Bus.",
             )
 
+        # Initialize local ServiceManager
         if getattr(app.state, "service_manager", None) is None:
             if service_manager is not None:
                 app.state.service_manager = service_manager
@@ -82,9 +92,16 @@ def create_app(
                     "ServiceManager and D-Bus adapters initialized with default scope 'user'."
                 )
 
+        # Initialize RemoteManager
+        if getattr(app.state, "remote_manager", None) is None:
+            app.state.remote_manager = remote_manager or RemoteManager()
+            logger.info("RemoteManager initialized on application state.")
+
         yield
 
         logger.info("Shutting down %s", app_settings.app_name)
+        if hasattr(app.state, "remote_manager") and app.state.remote_manager is not None:
+            await app.state.remote_manager.disconnect_all()
         await connection_manager.disconnect()
 
     app = FastAPI(
@@ -96,6 +113,8 @@ def create_app(
 
     if service_manager is not None:
         app.state.service_manager = service_manager
+    if remote_manager is not None:
+        app.state.remote_manager = remote_manager
 
     # Register API routes
     app.include_router(api_router)
@@ -116,6 +135,7 @@ def create_app(
                 "health": "/api/health",
                 "scope": "/api/scope",
                 "services": "/api/services",
+                "remote_devices": "/api/remote/devices",
             },
         }
 
@@ -142,6 +162,71 @@ def create_app(
             headers={"WWW-Authenticate": "Bearer"},
             content=ErrorDetail(
                 error="AuthenticationRequired",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(SSHAuthenticationError)
+    async def ssh_authentication_handler(
+        request: Request, exc: SSHAuthenticationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content=ErrorDetail(
+                error="SSHAuthenticationError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteHostKeyChangedError)
+    async def remote_host_key_handler(
+        request: Request, exc: RemoteHostKeyChangedError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content=ErrorDetail(
+                error="RemoteHostKeyChangedError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteTimeoutError)
+    async def remote_timeout_handler(
+        request: Request, exc: RemoteTimeoutError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            content=ErrorDetail(
+                error="RemoteTimeoutError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteProtocolError)
+    async def remote_protocol_handler(
+        request: Request, exc: RemoteProtocolError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content=ErrorDetail(
+                error="RemoteProtocolError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteConnectionError)
+    async def remote_connection_handler(
+        request: Request, exc: RemoteConnectionError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content=ErrorDetail(
+                error="RemoteConnectionError",
                 message=exc.message,
                 details=exc.details,
             ).model_dump(),
@@ -181,6 +266,45 @@ def create_app(
             status_code=status.HTTP_403_FORBIDDEN,
             content=ErrorDetail(
                 error="PermissionDeniedError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteDeviceNotTrustedError)
+    async def remote_not_trusted_handler(
+        request: Request, exc: RemoteDeviceNotTrustedError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content=ErrorDetail(
+                error="RemoteDeviceNotTrustedError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteDeviceRevokedError)
+    async def remote_revoked_handler(
+        request: Request, exc: RemoteDeviceRevokedError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content=ErrorDetail(
+                error="RemoteDeviceRevokedError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteAuthorizationMissingError)
+    async def remote_auth_missing_handler(
+        request: Request, exc: RemoteAuthorizationMissingError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content=ErrorDetail(
+                error="RemoteAuthorizationMissingError",
                 message=exc.message,
                 details=exc.details,
             ).model_dump(),

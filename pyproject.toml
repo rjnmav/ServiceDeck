@@ -32,6 +32,7 @@ dependencies = [
     "dbus-fast>=2.24.0",
     "httpx>=0.27.0",
     "PySide6>=6.6.0",
+    "asyncssh>=2.14.0",
 ]
 
 [project.optional-dependencies]
@@ -46,6 +47,7 @@ dev = [
 servicedeck = "servicedeck.cli:main"
 servicedeck-backend = "servicedeck.backend.main:main"
 servicedeck-gui = "servicedeck.gui.main:main"
+servicedeck-remote = "servicedeck.remote_agent.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
