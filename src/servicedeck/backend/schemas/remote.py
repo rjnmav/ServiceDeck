@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
+AgentMode = Literal["bundled", "installed", "auto"]
 
 
 class RemoteDeviceCreateRequest(BaseModel):
@@ -16,6 +20,11 @@ class RemoteDeviceCreateRequest(BaseModel):
     port: int = Field(default=22, ge=1, le=65535, description="SSH port")
     username: str | None = Field(default=None, description="SSH login username")
     ssh_key_path: str | None = Field(default=None, description="Path to private SSH key file")
+    agent_mode: AgentMode = Field(
+        default="bundled",
+        description="How the remote agent is started: 'bundled' streams it over SSH (no remote "
+        "install), 'installed' runs servicedeck-remote, 'auto' prefers an installed agent.",
+    )
 
 
 class RemoteDeviceResponse(BaseModel):
@@ -29,6 +38,7 @@ class RemoteDeviceResponse(BaseModel):
     port: int
     username: str | None
     ssh_key_path: str | None
+    agent_mode: AgentMode = "bundled"
     connected: bool
 
 

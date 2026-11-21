@@ -2,13 +2,12 @@
 
 import logging
 import os
-from typing import Self
 
 from dbus_fast.aio import MessageBus
 from dbus_fast.constants import BusType
 
-from servicedeck.backend.config.settings import Settings, get_settings
 from servicedeck.backend.exceptions import SystemdConnectionError
+from servicedeck.backend.infrastructure.dbus.config import DbusSettingsLike
 from servicedeck.backend.models.service import validate_scope
 
 logger = logging.getLogger(__name__)
@@ -17,8 +16,14 @@ logger = logging.getLogger(__name__)
 class DbusConnectionManager:
     """Manages asynchronous D-Bus connections for both User session bus and System bus."""
 
-    def __init__(self, settings: Settings | None = None) -> None:
-        self._settings = settings or get_settings()
+    def __init__(self, settings: DbusSettingsLike | None = None) -> None:
+        if settings is None:
+            # Imported lazily: the backend config pulls in pydantic, which the
+            # bundled remote agent cannot ship.
+            from servicedeck.backend.config.settings import get_settings
+
+            settings = get_settings()
+        self._settings: DbusSettingsLike = settings
         self._user_bus: MessageBus | None = None
         self._system_bus: MessageBus | None = None
 
@@ -105,7 +110,7 @@ class DbusConnectionManager:
                     else:
                         self._system_bus = None
 
-    async def __aenter__(self) -> Self:
+    async def __aenter__(self) -> "DbusConnectionManager":
         await self.connect("user")
         try:
             await self.connect("system")

@@ -73,6 +73,7 @@ class AsyncServiceDeckClient:
         username: str | None = None,
         display_name: str | None = None,
         ssh_key_path: str | None = None,
+        agent_mode: str | None = None,
     ) -> RemoteDevice:
         """Register a new remote device configuration."""
         payload: dict[str, Any] = {
@@ -85,6 +86,8 @@ class AsyncServiceDeckClient:
             payload["username"] = username
         if ssh_key_path:
             payload["ssh_key_path"] = ssh_key_path
+        if agent_mode:
+            payload["agent_mode"] = agent_mode
         data = await self.transport.request("POST", "/api/remote/devices", json=payload)
         return RemoteDevice.from_dict(data)
 

@@ -30,6 +30,7 @@ async def list_devices(remote_manager: RemoteManagerDep) -> list[RemoteDeviceRes
             port=d.port,
             username=d.username,
             ssh_key_path=d.ssh_key_path,
+            agent_mode=d.agent_mode,  # type: ignore[arg-type]
             connected=remote_manager.is_connected(d.id),
         )
         for d in devices
@@ -54,6 +55,7 @@ async def add_device(
         port=payload.port,
         username=payload.username,
         ssh_key_path=payload.ssh_key_path,
+        agent_mode=payload.agent_mode,
     )
     saved = remote_manager.add_device(device)
     return RemoteDeviceResponse(
@@ -63,6 +65,7 @@ async def add_device(
         port=saved.port,
         username=saved.username,
         ssh_key_path=saved.ssh_key_path,
+        agent_mode=saved.agent_mode,  # type: ignore[arg-type]
         connected=remote_manager.is_connected(saved.id),
     )
 

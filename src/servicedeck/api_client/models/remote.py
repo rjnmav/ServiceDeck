@@ -14,6 +14,7 @@ class RemoteDevice:
     port: int = 22
     username: str | None = None
     ssh_key_path: str | None = None
+    agent_mode: str = "bundled"
     connected: bool = False
 
     @classmethod
@@ -26,6 +27,7 @@ class RemoteDevice:
             port=int(data.get("port", 22)),
             username=str(data["username"]) if data.get("username") else None,
             ssh_key_path=str(data["ssh_key_path"]) if data.get("ssh_key_path") else None,
+            agent_mode=str(data.get("agent_mode") or "bundled"),
             connected=bool(data.get("connected", False)),
         )
 

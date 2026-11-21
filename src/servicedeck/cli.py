@@ -65,6 +65,14 @@ def main(argv: list[str] | None = None) -> int:
     add_parser.add_argument("--username", "-u", type=str, default=None, help="SSH username")
     add_parser.add_argument("--name", "-n", type=str, default=None, help="Display name")
     add_parser.add_argument("--key", "-k", type=str, default=None, help="Path to private SSH key")
+    add_parser.add_argument(
+        "--agent-mode",
+        choices=["bundled", "installed", "auto"],
+        default="bundled",
+        help="How to start the remote agent: 'bundled' streams it over SSH so nothing needs "
+        "to be installed remotely (default); 'installed' runs servicedeck-remote; 'auto' "
+        "uses an installed agent when present",
+    )
 
     # remote list
     remote_subparsers.add_parser("list", help="List configured remote machines")
@@ -113,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
                 port=args.port,
                 username=args.username,
                 ssh_key_path=args.key,
+                agent_mode=args.agent_mode,
             )
             cfg_mgr.save_device(device)
             print(f"Device '{device.id}' ({device.hostname}:{device.port}) added successfully.")
@@ -136,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Host:          {device.hostname}:{device.port}")
             print(f"Username:      {device.username or 'default'}")
             print(f"Key Path:      {device.ssh_key_path or 'ssh-agent'}")
+            print(f"Agent Mode:    {device.agent_mode}")
             return 0
 
     if args.subcommand == "gui":

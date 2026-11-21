@@ -15,8 +15,8 @@ import os
 import signal
 import sys
 
-from servicedeck.backend.config.settings import Settings
 from servicedeck.backend.core.service_manager import ServiceManager
+from servicedeck.backend.infrastructure.dbus.config import DbusSettings
 from servicedeck.backend.infrastructure.dbus.connection import DbusConnectionManager
 from servicedeck.backend.infrastructure.dbus.systemd import DbusSystemdAdapter
 from servicedeck.remote_agent.dispatcher import RequestDispatcher
@@ -63,7 +63,7 @@ async def _diagnose_identity() -> None:
     )
     sys.stderr.write(f"7. XDG_RUNTIME_DIR: {os.environ.get('XDG_RUNTIME_DIR', 'NOT SET')}\n")
 
-    settings = Settings()
+    settings = DbusSettings.from_env()
     connection_manager = DbusConnectionManager(settings=settings)
     adapter = DbusSystemdAdapter(connection_manager=connection_manager, settings=settings)
     manager = ServiceManager(adapter=adapter)
@@ -110,7 +110,7 @@ async def async_main(log_level: int) -> int:
         except (NotImplementedError, RuntimeError):
             pass
 
-    settings = Settings()
+    settings = DbusSettings.from_env()
     connection_manager = DbusConnectionManager(settings=settings)
     adapter = DbusSystemdAdapter(connection_manager=connection_manager, settings=settings)
     service_manager = ServiceManager(adapter=adapter)

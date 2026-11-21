@@ -104,6 +104,14 @@ class SSHAuthenticationError(RemoteConnectionError):
     """Raised when SSH authentication (public-key or agent) fails."""
 
 
+class RemoteAgentBootstrapError(RemoteConnectionError):
+    """Raised when the remote agent could not be started on the remote host.
+
+    Typical causes: ``python3`` missing or too old on the remote host, or the
+    installed ``servicedeck-remote`` exiting before completing the handshake.
+    """
+
+
 class RemoteDeviceNotTrustedError(ServiceDeckError):
     """Raised when attempting to operate on a remote device that is not trusted/paired."""
 
