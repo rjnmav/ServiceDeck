@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from servicedeck.backend.remote.device_config import RemoteDevice
+from servicedeck.backend.remote.known_hosts import KnownHostsStore
 from servicedeck.backend.remote.transport import SSHTransport
 from servicedeck.remote.models import HelloMessage
 
@@ -14,8 +15,14 @@ logger = logging.getLogger(__name__)
 class RemoteConnectionManager:
     """Manages active SSH transport connections to remote ServiceDeck devices."""
 
-    def __init__(self) -> None:
+    def __init__(self, known_hosts: KnownHostsStore | None = None) -> None:
         self._transports: dict[str, SSHTransport] = {}
+        self._known_hosts = known_hosts or KnownHostsStore()
+
+    @property
+    def known_hosts(self) -> KnownHostsStore:
+        """Host-key trust store shared by all transports."""
+        return self._known_hosts
 
     def is_connected(self, device_id: str) -> bool:
         """Return True if an active transport exists and is connected for device_id."""
@@ -54,7 +61,9 @@ class RemoteConnectionManager:
             await existing.disconnect()
             self._transports.pop(device.id, None)
 
-        transport = SSHTransport(device=device, remote_command=remote_command)
+        transport = SSHTransport(
+            device=device, remote_command=remote_command, known_hosts=self._known_hosts
+        )
         hello = await transport.connect(timeout=timeout)
         self._transports[device.id] = transport
         return hello

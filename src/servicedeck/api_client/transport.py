@@ -18,6 +18,8 @@ from servicedeck.api_client.exceptions import (
 )
 
 DEFAULT_TIMEOUT = 10.0
+#: Host-key checks and key setup chain several SSH round trips.
+ONBOARDING_TIMEOUT = 60.0
 
 
 def _parse_error_payload(response: httpx.Response) -> tuple[str, str, dict[str, Any]]:
@@ -83,6 +85,7 @@ class SyncTransport:
         path: str,
         params: dict[str, Any] | None = None,
         json: Any = None,
+        timeout: float | None = None,
     ) -> Any:
         """Send a synchronous HTTP request, returning parsed JSON."""
         clean_path = "/" + path.lstrip("/")
@@ -92,6 +95,7 @@ class SyncTransport:
                 url=clean_path,
                 params=params,
                 json=json,
+                **({} if timeout is None else {"timeout": timeout}),
             )
         except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
             raise ServiceDeckConnectionError(
@@ -135,6 +139,7 @@ class AsyncTransport:
         path: str,
         params: dict[str, Any] | None = None,
         json: Any = None,
+        timeout: float | None = None,
     ) -> Any:
         """Send an asynchronous HTTP request, returning parsed JSON."""
         clean_path = "/" + path.lstrip("/")
@@ -144,6 +149,7 @@ class AsyncTransport:
                 url=clean_path,
                 params=params,
                 json=json,
+                **({} if timeout is None else {"timeout": timeout}),
             )
         except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as exc:
             raise ServiceDeckConnectionError(

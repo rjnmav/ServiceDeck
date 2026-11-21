@@ -100,6 +100,18 @@ class RemoteHostKeyChangedError(RemoteConnectionError):
     """Raised when the remote SSH host key does not match known_hosts."""
 
 
+class RemoteHostKeyUnknownError(RemoteConnectionError):
+    """Raised when connecting to a host whose SSH host key has never been trusted.
+
+    ``details`` carries ``fingerprint``, ``key_type``, ``hostname`` and ``port`` so the
+    client can show the fingerprint for Trust-On-First-Use confirmation.
+    """
+
+
+class RemoteKeySetupError(RemoteConnectionError):
+    """Raised when installing or verifying the SSH login key on a remote host fails."""
+
+
 class SSHAuthenticationError(RemoteConnectionError):
     """Raised when SSH authentication (public-key or agent) fails."""
 

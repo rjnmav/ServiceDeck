@@ -19,7 +19,8 @@ from PySide6.QtWidgets import (
 )
 
 from servicedeck.api_client import ServiceDeckClient
-from servicedeck.api_client.models.remote import RemoteConnectionInfo, RemoteDevice
+from servicedeck.api_client.models.remote import KeySetupInfo, RemoteConnectionInfo, RemoteDevice
+from servicedeck.gui.views.dialogs.remote_onboarding import connect_with_onboarding
 from servicedeck.gui.workers.service_worker import run_async_task
 
 
@@ -187,25 +188,19 @@ class AddRemoteDeviceDialog(QDialog):
         self._test_btn.setEnabled(False)
         self._show_banner("Testing SSH connection and agent handshake...", is_error=False)
 
-        def task() -> RemoteConnectionInfo:
-            # Register temporary device, connect, and remove
-            self._client.add_device(
-                id=dev_id,
-                hostname=host,
-                port=port,
-                username=user,
-                ssh_key_path=key,
-            )
-            try:
-                info = self._client.connect_device(dev_id)
-                return info
-            finally:
+        target = f"{user}@{host}" if user else host
+
+        def cleanup() -> None:
+            def remove() -> None:
                 try:
                     self._client.remove_device(dev_id)
                 except Exception:
                     pass
 
+            run_async_task(remove)
+
         def on_success(info: RemoteConnectionInfo) -> None:
+            cleanup()
             self._test_btn.setEnabled(True)
             user_str = info.remote_user or "user"
             uid_str = f"UID {info.remote_uid}" if info.remote_uid is not None else ""
@@ -214,10 +209,39 @@ class AddRemoteDeviceDialog(QDialog):
             self._show_banner(msg, is_error=False)
 
         def on_error(msg: str, exc: Any) -> None:
+            cleanup()
             self._test_btn.setEnabled(True)
             self._show_banner(f"✖ Connection failed: {msg}", is_error=True)
 
-        run_async_task(task, on_success=on_success, on_error=on_error)
+        def on_registered(_dev: RemoteDevice) -> None:
+            connect_with_onboarding(
+                self,
+                self._client,
+                dev_id,
+                target=target,
+                on_success=on_success,
+                on_error=on_error,
+                on_key_installed=self._on_key_installed,
+            )
+
+        # Register a temporary device for the test; it is removed when the test ends.
+        run_async_task(
+            self._client.add_device,
+            id=dev_id,
+            hostname=host,
+            port=port,
+            username=user,
+            ssh_key_path=key,
+            on_success=on_registered,
+            on_error=on_error,
+        )
+
+    def _on_key_installed(self, result: KeySetupInfo) -> None:
+        """Remember the installed key so saving the device keeps using it."""
+        self._key_edit.setText(result.key_path)
+        self._show_banner(
+            f"✔ SSH key installed ({result.key_fingerprint}). Connecting...", is_error=False
+        )
 
     def _on_save_clicked(self) -> None:
         """Save device configuration and accept dialog."""
@@ -240,28 +264,46 @@ class AddRemoteDeviceDialog(QDialog):
         self._save_btn.setEnabled(False)
         self._show_banner("Registering device...", is_error=False)
 
-        def task() -> RemoteDevice:
-            dev = self._client.add_device(
-                id=dev_id,
-                hostname=host,
-                port=port,
-                username=user,
-                display_name=name,
-                ssh_key_path=key,
-            )
-            # Attempt initial connection
-            try:
-                self._client.connect_device(dev_id)
-            except Exception:
-                pass
-            return dev
+        target = f"{user}@{host}" if user else host
 
-        def on_success(dev: RemoteDevice) -> None:
-            self.created_device = dev
-            self.accept()
-
-        def on_error(msg: str, exc: Any) -> None:
+        def on_register_error(msg: str, exc: Any) -> None:
             self._save_btn.setEnabled(True)
             self._show_banner(f"Failed to add device: {msg}", is_error=True)
 
-        run_async_task(task, on_success=on_success, on_error=on_error)
+        def on_registered(dev: RemoteDevice) -> None:
+            self.created_device = dev
+            self._show_banner("Device saved. Connecting...", is_error=False)
+
+            def on_connected(_info: RemoteConnectionInfo) -> None:
+                self.accept()
+
+            def on_connect_error(msg: str, exc: Any) -> None:
+                QMessageBox.warning(
+                    self,
+                    "Device Saved",
+                    f"The device was saved, but connecting to it failed:\n\n{msg}\n\n"
+                    "You can connect again later from Manage Hosts.",
+                )
+                self.accept()
+
+            connect_with_onboarding(
+                self,
+                self._client,
+                dev.id,
+                target=target,
+                on_success=on_connected,
+                on_error=on_connect_error,
+                on_key_installed=self._on_key_installed,
+            )
+
+        run_async_task(
+            self._client.add_device,
+            id=dev_id,
+            hostname=host,
+            port=port,
+            username=user,
+            display_name=name,
+            ssh_key_path=key,
+            on_success=on_registered,
+            on_error=on_register_error,
+        )

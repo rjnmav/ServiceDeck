@@ -4,11 +4,16 @@ from fastapi import APIRouter, HTTPException, status
 
 from servicedeck.backend.api.dependencies import RemoteManagerDep
 from servicedeck.backend.remote.device_config import RemoteDevice
+from servicedeck.backend.remote.known_hosts import HostKeyInfo
 from servicedeck.backend.schemas.remote import (
+    HostKeyResponse,
     RemoteConnectionResponse,
     RemoteDeviceCreateRequest,
     RemoteDeviceDisconnectResponse,
     RemoteDeviceResponse,
+    SetupKeyRequest,
+    SetupKeyResponse,
+    TrustHostKeyRequest,
 )
 
 router = APIRouter(prefix="/remote/devices", tags=["Remote Devices"])
@@ -141,4 +146,72 @@ async def get_device_status(
         remote_user=hello.user if hello else None,
         remote_uid=hello.uid if hello else None,
         remote_version=hello.servicedeck_version if hello else None,
+    )
+
+
+def _host_key_response(info: HostKeyInfo) -> HostKeyResponse:
+    return HostKeyResponse(
+        hostname=info.hostname,
+        port=info.port,
+        status=info.status,
+        key_type=info.key_type,
+        fingerprint=info.fingerprint,
+    )
+
+
+@router.get(
+    "/{device_id}/host-key",
+    response_model=HostKeyResponse,
+    summary="Inspect Remote Host Key",
+    description="Fetch the device's SSH host key fingerprint and whether it is already trusted.",
+)
+async def get_host_key(device_id: str, remote_manager: RemoteManagerDep) -> HostKeyResponse:
+    return _host_key_response(await remote_manager.check_host_key(device_id))
+
+
+@router.post(
+    "/{device_id}/host-key/trust",
+    response_model=HostKeyResponse,
+    summary="Trust Remote Host Key",
+    description="Record the device's SSH host key after the user verified its fingerprint. "
+    "Refused if the key no longer matches the confirmed fingerprint, or if a different key "
+    "is already trusted for this host.",
+)
+async def trust_host_key(
+    device_id: str,
+    payload: TrustHostKeyRequest,
+    remote_manager: RemoteManagerDep,
+) -> HostKeyResponse:
+    return _host_key_response(await remote_manager.trust_host_key(device_id, payload.fingerprint))
+
+
+@router.post(
+    "/{device_id}/setup-key",
+    response_model=SetupKeyResponse,
+    summary="Set Up SSH Key Login",
+    description="Log in once with the remote account password, install the ServiceDeck SSH "
+    "key in ~/.ssh/authorized_keys and verify that key login works. The password is used for "
+    "that single login and is never stored or logged.",
+)
+async def setup_key(
+    device_id: str,
+    payload: SetupKeyRequest,
+    remote_manager: RemoteManagerDep,
+) -> SetupKeyResponse:
+    result = await remote_manager.setup_key(device_id, payload.password.get_secret_value())
+    device = result.device
+    return SetupKeyResponse(
+        device=RemoteDeviceResponse(
+            id=device.id,
+            display_name=device.display_name,
+            hostname=device.hostname,
+            port=device.port,
+            username=device.username,
+            ssh_key_path=device.ssh_key_path,
+            agent_mode=device.agent_mode,  # type: ignore[arg-type]
+            connected=remote_manager.is_connected(device.id),
+        ),
+        key_path=str(result.key.private_path),
+        key_fingerprint=result.key.fingerprint,
+        added=result.added,
     )

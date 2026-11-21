@@ -23,6 +23,8 @@ from servicedeck.backend.exceptions import (
     RemoteDeviceNotTrustedError,
     RemoteDeviceRevokedError,
     RemoteHostKeyChangedError,
+    RemoteHostKeyUnknownError,
+    RemoteKeySetupError,
     ServiceDeckError,
     ServiceNotFoundError,
     ServiceOperationError,
@@ -175,6 +177,30 @@ def create_app(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content=ErrorDetail(
                 error="SSHAuthenticationError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteHostKeyUnknownError)
+    async def remote_host_key_unknown_handler(
+        request: Request, exc: RemoteHostKeyUnknownError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=ErrorDetail(
+                error="RemoteHostKeyUnknownError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteKeySetupError)
+    async def remote_key_setup_handler(request: Request, exc: RemoteKeySetupError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content=ErrorDetail(
+                error="RemoteKeySetupError",
                 message=exc.message,
                 details=exc.details,
             ).model_dump(),

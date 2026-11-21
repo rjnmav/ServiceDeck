@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 AgentMode = Literal["bundled", "installed", "auto"]
 
@@ -64,9 +64,56 @@ class RemoteDeviceDisconnectResponse(BaseModel):
     connected: bool = False
 
 
+class HostKeyResponse(BaseModel):
+    """The SSH host key a remote server presents and whether it is trusted."""
+
+    model_config = ConfigDict(frozen=True)
+
+    hostname: str
+    port: int
+    status: Literal["trusted", "unknown", "changed"]
+    key_type: str
+    fingerprint: str = Field(..., description="SHA256 fingerprint, as shown by ssh-keygen -l")
+
+
+class TrustHostKeyRequest(BaseModel):
+    """Confirmation of the fingerprint the user verified."""
+
+    model_config = ConfigDict(frozen=True)
+
+    fingerprint: str = Field(..., min_length=1, description="Fingerprint the user confirmed")
+
+
+class SetupKeyRequest(BaseModel):
+    """One-time remote account password used to install the SSH login key."""
+
+    model_config = ConfigDict(frozen=True)
+
+    password: SecretStr = Field(
+        ...,
+        description="Remote account password. Used for a single SSH login to install the key; "
+        "never stored or logged.",
+    )
+
+
+class SetupKeyResponse(BaseModel):
+    """Result of installing the SSH login key on a remote device."""
+
+    model_config = ConfigDict(frozen=True)
+
+    device: RemoteDeviceResponse
+    key_path: str
+    key_fingerprint: str
+    added: bool = Field(..., description="False if the key was already authorized")
+
+
 __all__ = [
+    "HostKeyResponse",
     "RemoteConnectionResponse",
     "RemoteDeviceCreateRequest",
     "RemoteDeviceDisconnectResponse",
     "RemoteDeviceResponse",
+    "SetupKeyRequest",
+    "SetupKeyResponse",
+    "TrustHostKeyRequest",
 ]

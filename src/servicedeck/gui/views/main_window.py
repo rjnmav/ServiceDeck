@@ -32,6 +32,10 @@ from servicedeck.gui.views.dialogs.manage_remote_devices_dialog import (
     ManageRemoteDevicesDialog,
 )
 from servicedeck.gui.views.dialogs.preferences_dialog import PreferencesDialog
+from servicedeck.gui.views.dialogs.remote_onboarding import (
+    MAX_ONBOARDING_STEPS,
+    handle_onboarding_error,
+)
 from servicedeck.gui.views.service_detail_panel import ServiceDetailPanel
 from servicedeck.gui.views.service_toolbar import ServiceToolbar
 from servicedeck.gui.workers.service_worker import run_async_task
@@ -48,6 +52,7 @@ class MainWindow(QMainWindow):
         self._current_device_id: str | None = None
         self._devices: list[RemoteDevice] = []
         self._is_busy = False
+        self._onboarding_steps = 0
         self._log_refresh_interval = 5
         self._resource_refresh_interval = 2
 
@@ -229,15 +234,40 @@ class MainWindow(QMainWindow):
 
         def on_success(services: list[Service]) -> None:
             self._is_busy = False
+            self._onboarding_steps = 0
             self._populate_table(services)
             host_label = self._get_host_display_name()
             self.set_status(f"Loaded {len(services)} services ({host_label})", success=True)
 
         def on_error(msg: str, exc: Any) -> None:
             self._is_busy = False
+            if device_id is not None and self._onboarding_steps < MAX_ONBOARDING_STEPS:
+                self._onboarding_steps += 1
+                handled = handle_onboarding_error(
+                    self,
+                    self.client,
+                    device_id,
+                    exc,
+                    target=self._device_target(device_id),
+                    retry=self.request_service_list,
+                    on_give_up=lambda reason: self.set_status(
+                        f"Not connected to {self._get_host_display_name()}: {reason}",
+                        success=False,
+                    ),
+                )
+                if handled:
+                    return
+            self._onboarding_steps = 0
             self.set_status(f"Failed to refresh services: {msg}", success=False)
 
         run_async_task(task, on_start=on_start, on_success=on_success, on_error=on_error)
+
+    def _device_target(self, device_id: str) -> str:
+        """``user@host`` label for prompts, from the known device list."""
+        for dev in self._devices:
+            if dev.id == device_id:
+                return f"{dev.username}@{dev.hostname}" if dev.username else dev.hostname
+        return device_id
 
     def _populate_table(self, services: list[Service]) -> None:
         self._table_model.set_services(services)

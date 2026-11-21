@@ -56,4 +56,46 @@ class RemoteConnectionInfo:
         )
 
 
-__all__ = ["RemoteConnectionInfo", "RemoteDevice"]
+@dataclass(frozen=True, slots=True)
+class HostKeyInfo:
+    """SSH host key presented by a remote device and its trust status."""
+
+    hostname: str
+    port: int
+    status: str  # "trusted" | "unknown" | "changed"
+    key_type: str
+    fingerprint: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "HostKeyInfo":
+        """Construct HostKeyInfo from an API response (or error details) dict."""
+        return cls(
+            hostname=str(data.get("hostname", "")),
+            port=int(data.get("port", 22)),
+            status=str(data.get("status", "unknown")),
+            key_type=str(data.get("key_type", "")),
+            fingerprint=str(data.get("fingerprint", "")),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class KeySetupInfo:
+    """Result of installing the SSH login key on a remote device."""
+
+    device: RemoteDevice
+    key_path: str
+    key_fingerprint: str
+    added: bool
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "KeySetupInfo":
+        """Construct KeySetupInfo from API response dict."""
+        return cls(
+            device=RemoteDevice.from_dict(data["device"]),
+            key_path=str(data["key_path"]),
+            key_fingerprint=str(data["key_fingerprint"]),
+            added=bool(data.get("added", True)),
+        )
+
+
+__all__ = ["HostKeyInfo", "KeySetupInfo", "RemoteConnectionInfo", "RemoteDevice"]

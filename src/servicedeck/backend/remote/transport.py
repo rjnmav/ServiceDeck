@@ -23,6 +23,7 @@ from servicedeck.backend.remote.bundle import (
     stage1_command,
 )
 from servicedeck.backend.remote.device_config import RemoteDevice
+from servicedeck.backend.remote.known_hosts import KnownHostsStore
 from servicedeck.remote.exceptions import RemoteProtocolError, RemoteTimeoutError
 from servicedeck.remote.models import (
     GoodbyeMessage,
@@ -50,9 +51,11 @@ class SSHTransport:
         self,
         device: RemoteDevice,
         remote_command: str = "servicedeck-remote",
+        known_hosts: KnownHostsStore | None = None,
     ) -> None:
         self._device = device
         self._remote_command = remote_command
+        self._known_hosts = known_hosts or KnownHostsStore()
         self._conn: asyncssh.SSHClientConnection | None = None
         self._process: asyncssh.SSHClientProcess | None = None
         self._hello: HelloMessage | None = None
@@ -98,6 +101,7 @@ class SSHTransport:
             "port": self._device.port,
             "username": self._device.username,
             "agent_forwarding": False,
+            "known_hosts": self._known_hosts.paths(),
         }
         if self._device.ssh_key_path:
             connect_kwargs["client_keys"] = [self._device.ssh_key_path]
@@ -108,11 +112,7 @@ class SSHTransport:
                 timeout=timeout,
             )
         except asyncssh.HostKeyNotVerifiable as exc:
-            msg = f"SSH host key verification failed for {self._device.hostname}: {exc}"
-            logger.error(msg)
-            raise RemoteHostKeyChangedError(
-                msg, details={"hostname": self._device.hostname}
-            ) from exc
+            raise await self._host_key_error(exc) from exc
         except asyncssh.PermissionDenied as exc:
             msg = f"SSH authentication failed for {self._device.hostname}: {exc}"
             logger.error(msg)
@@ -194,6 +194,22 @@ class SSHTransport:
         except Exception:
             await self.disconnect()
             raise
+
+    async def _host_key_error(self, exc: Exception) -> RemoteConnectionError:
+        """Tell an untrusted (first-contact) host key apart from a changed one."""
+        try:
+            info = await self._known_hosts.check(self._device.hostname, self._device.port)
+        except RemoteConnectionError as check_exc:
+            logger.debug("Could not classify host key of %s: %s", self._device.hostname, check_exc)
+            msg = f"SSH host key verification failed for {self._device.hostname}: {exc}"
+            logger.error(msg)
+            return RemoteHostKeyChangedError(msg, details={"hostname": self._device.hostname})
+        error = self._known_hosts.unverified_error(info)
+        if info.status == "changed":
+            logger.error(error.message)
+        else:
+            logger.info("Host key of %s is not trusted yet (%s)", info.hostname, info.fingerprint)
+        return error
 
     async def _resolve_launch(self) -> tuple[str, AgentPayload | None, str]:
         """Pick the remote command (and optional bundle payload) for the device's agent_mode."""

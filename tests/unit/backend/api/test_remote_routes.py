@@ -1,5 +1,6 @@
 """Unit tests for remote device and service REST API endpoints."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -72,7 +73,9 @@ async def remote_client(
 # --- Device endpoints tests ---
 
 
-async def test_list_devices_empty(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
+async def test_list_devices_empty(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
     resp = await remote_client.get("/api/remote/devices")
     assert resp.status_code == 200
     assert resp.json() == []
@@ -103,14 +106,18 @@ async def test_add_device(remote_client: AsyncClient, mock_remote_manager: Magic
     assert data["connected"] is False
 
 
-async def test_remove_device_success(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
+async def test_remove_device_success(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
     mock_remote_manager.remove_device.return_value = True
     resp = await remote_client.delete("/api/remote/devices/box1")
     assert resp.status_code == 204
     mock_remote_manager.remove_device.assert_called_once_with("box1")
 
 
-async def test_remove_device_not_found(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
+async def test_remove_device_not_found(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
     mock_remote_manager.remove_device.return_value = False
     resp = await remote_client.delete("/api/remote/devices/unknown")
     assert resp.status_code == 404
@@ -131,7 +138,9 @@ async def test_connect_device(remote_client: AsyncClient, mock_remote_manager: M
     assert data["remote_uid"] == 1001
 
 
-async def test_disconnect_device(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
+async def test_disconnect_device(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
     resp = await remote_client.post("/api/remote/devices/box1/disconnect")
     assert resp.status_code == 200
     data = resp.json()
@@ -142,7 +151,9 @@ async def test_disconnect_device(remote_client: AsyncClient, mock_remote_manager
 async def test_device_status(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
     mock_remote_manager.is_connected.return_value = True
     mock_transport = MagicMock()
-    mock_transport.hello = HelloMessage(host="box1", user="deploy", uid=1001, servicedeck_version="2.0.0")
+    mock_transport.hello = HelloMessage(
+        host="box1", user="deploy", uid=1001, servicedeck_version="2.0.0"
+    )
     mock_remote_manager.connection_manager.get_transport.return_value = mock_transport
 
     resp = await remote_client.get("/api/remote/devices/box1/status")
@@ -155,7 +166,9 @@ async def test_device_status(remote_client: AsyncClient, mock_remote_manager: Ma
 # --- Remote Service Endpoints tests ---
 
 
-async def test_list_remote_services(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
+async def test_list_remote_services(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
     mock_remote_manager.list_services.return_value = [
         Service(
             name="ssh.service",
@@ -176,7 +189,9 @@ async def test_list_remote_services(remote_client: AsyncClient, mock_remote_mana
     mock_remote_manager.list_services.assert_called_once_with(device_id="box1", scope="system")
 
 
-async def test_get_remote_service(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
+async def test_get_remote_service(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
     mock_remote_manager.get_service.return_value = Service(
         name="nginx.service",
         description="Nginx",
@@ -192,7 +207,9 @@ async def test_get_remote_service(remote_client: AsyncClient, mock_remote_manage
     assert resp.json()["name"] == "nginx.service"
 
 
-async def test_remote_service_operations(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
+async def test_remote_service_operations(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
     operations = ["start", "stop", "restart", "reload", "enable", "disable", "mask", "unmask"]
     for op in operations:
         resp = await remote_client.post(f"/api/remote/box1/services/ssh.service/{op}")
@@ -202,7 +219,9 @@ async def test_remote_service_operations(remote_client: AsyncClient, mock_remote
         assert data["operation"] == op
 
 
-async def test_remote_daemon_reload(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
+async def test_remote_daemon_reload(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
     resp = await remote_client.post("/api/remote/box1/daemon/reload")
     assert resp.status_code == 200
     assert resp.json()["success"] is True
@@ -270,3 +289,96 @@ async def test_remote_auth_error_mapped_to_401(
     resp = await remote_client.post("/api/remote/devices/box1/connect")
     assert resp.status_code == 401
     assert resp.json()["error"] == "SSHAuthenticationError"
+
+
+# --- Onboarding endpoints (host-key trust, SSH key setup) ---
+
+
+async def test_get_host_key(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
+    from servicedeck.backend.remote.known_hosts import HostKeyInfo
+
+    mock_remote_manager.check_host_key = AsyncMock(
+        return_value=HostKeyInfo("srv.test", 22, "unknown", "ssh-ed25519", "SHA256:abc")
+    )
+    resp = await remote_client.get("/api/remote/devices/srv/host-key")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "hostname": "srv.test",
+        "port": 22,
+        "status": "unknown",
+        "key_type": "ssh-ed25519",
+        "fingerprint": "SHA256:abc",
+    }
+
+
+async def test_connect_unknown_host_key_returns_409_with_fingerprint(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
+    from servicedeck.backend.exceptions import RemoteHostKeyUnknownError
+
+    mock_remote_manager.connect = AsyncMock(
+        side_effect=RemoteHostKeyUnknownError(
+            "not trusted", details={"fingerprint": "SHA256:abc", "hostname": "srv.test"}
+        )
+    )
+    resp = await remote_client.post("/api/remote/devices/srv/connect")
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["error"] == "RemoteHostKeyUnknownError"
+    assert body["details"]["fingerprint"] == "SHA256:abc"
+
+
+async def test_trust_host_key(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
+    from servicedeck.backend.remote.known_hosts import HostKeyInfo
+
+    mock_remote_manager.trust_host_key = AsyncMock(
+        return_value=HostKeyInfo("srv.test", 22, "trusted", "ssh-ed25519", "SHA256:abc")
+    )
+    resp = await remote_client.post(
+        "/api/remote/devices/srv/host-key/trust", json={"fingerprint": "SHA256:abc"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "trusted"
+    mock_remote_manager.trust_host_key.assert_awaited_once_with("srv", "SHA256:abc")
+
+
+async def test_setup_key_success_never_echoes_password(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock, tmp_path: Path
+) -> None:
+    from servicedeck.backend.remote.key_setup import KeySetupResult
+    from servicedeck.backend.remote.keys import LoginKey
+
+    key = LoginKey(
+        tmp_path / "id_ed25519", "ssh-ed25519", "AAAA", "servicedeck@pc", "SHA256:k", True
+    )
+    device = RemoteDevice(
+        id="srv", display_name="Srv", hostname="srv.test", ssh_key_path=str(key.private_path)
+    )
+    mock_remote_manager.setup_key = AsyncMock(
+        return_value=KeySetupResult(device=device, key=key, added=True)
+    )
+
+    resp = await remote_client.post(
+        "/api/remote/devices/srv/setup-key", json={"password": "hunter2-secret"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["key_fingerprint"] == "SHA256:k"
+    assert body["added"] is True
+    assert body["device"]["ssh_key_path"] == str(key.private_path)
+    assert "hunter2-secret" not in resp.text
+    mock_remote_manager.setup_key.assert_awaited_once_with("srv", "hunter2-secret")
+
+
+async def test_setup_key_wrong_password_returns_401(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
+    mock_remote_manager.setup_key = AsyncMock(
+        side_effect=SSHAuthenticationError("SSH login to alice@srv.test was rejected")
+    )
+    resp = await remote_client.post(
+        "/api/remote/devices/srv/setup-key", json={"password": "hunter2-secret"}
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "SSHAuthenticationError"
+    assert "hunter2-secret" not in resp.text

@@ -19,6 +19,9 @@ from servicedeck.backend.exceptions import (
 from servicedeck.backend.models.service import Service, ServiceResourceUsage
 from servicedeck.backend.remote.connection import RemoteConnectionManager
 from servicedeck.backend.remote.device_config import DeviceConfigManager, RemoteDevice
+from servicedeck.backend.remote.key_setup import KeySetupResult, setup_key
+from servicedeck.backend.remote.keys import ServiceDeckKeyStore
+from servicedeck.backend.remote.known_hosts import HostKeyInfo
 from servicedeck.remote.models import HelloMessage, RequestMessage
 
 logger = logging.getLogger(__name__)
@@ -31,9 +34,11 @@ class RemoteManager:
         self,
         connection_manager: RemoteConnectionManager | None = None,
         config_manager: DeviceConfigManager | None = None,
+        key_store: ServiceDeckKeyStore | None = None,
     ) -> None:
         self._connections = connection_manager or RemoteConnectionManager()
         self._config = config_manager or DeviceConfigManager()
+        self._keys = key_store or ServiceDeckKeyStore()
         self._next_request_id = 1
 
     @property
@@ -71,6 +76,43 @@ class RemoteManager:
         """Disconnect and remove a remote device from saved configuration."""
         await self._connections.disconnect(device_id)
         return self._config.remove_device(device_id)
+
+    def _require_device(self, device_id: str) -> RemoteDevice:
+        device = self._config.get_device(device_id)
+        if device is None:
+            raise RemoteConnectionError(
+                f"Device '{device_id}' is not configured.",
+                details={"device_id": device_id},
+            )
+        return device
+
+    # --- First-connection onboarding (host-key trust, SSH key setup) ---
+
+    async def check_host_key(self, device_id: str) -> HostKeyInfo:
+        """Fetch the device's SSH host key and report whether it is trusted."""
+        device = self._require_device(device_id)
+        return await self._connections.known_hosts.check(device.hostname, device.port)
+
+    async def trust_host_key(self, device_id: str, fingerprint: str) -> HostKeyInfo:
+        """Trust the device's host key, provided it still matches ``fingerprint``."""
+        device = self._require_device(device_id)
+        return await self._connections.known_hosts.trust(device.hostname, device.port, fingerprint)
+
+    async def setup_key(self, device_id: str, password: str) -> KeySetupResult:
+        """Install a login key on the device using its password once, then save the device.
+
+        The password is only forwarded to the one-time SSH login; it is never stored.
+        """
+        device = self._require_device(device_id)
+        await self._connections.disconnect(device_id)
+        result = await setup_key(
+            device,
+            password,
+            key_store=self._keys,
+            known_hosts=self._connections.known_hosts,
+        )
+        self._config.save_device(result.device)
+        return result
 
     # --- Connection Lifecycle ---
 

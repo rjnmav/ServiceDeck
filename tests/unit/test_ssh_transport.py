@@ -12,6 +12,7 @@ from servicedeck.backend.exceptions import (
     RemoteAgentBootstrapError,
     RemoteConnectionError,
     RemoteHostKeyChangedError,
+    RemoteHostKeyUnknownError,
     SSHAuthenticationError,
 )
 from servicedeck.backend.remote.bundle import get_agent_payload
@@ -385,3 +386,40 @@ async def test_connect_installed_reports_missing_agent(device: RemoteDevice) -> 
         transport = SSHTransport(device=_with_mode(device, "installed"))
         with pytest.raises(RemoteAgentBootstrapError, match="'servicedeck-remote' was not found"):
             await transport.connect(timeout=5.0)
+
+
+class _FixedStatusStore:
+    """Known-hosts stand-in reporting a fixed classification."""
+
+    def __init__(self, status: str) -> None:
+        from servicedeck.backend.remote.known_hosts import HostKeyInfo, KnownHostsStore
+
+        self._real = KnownHostsStore(path=None, extra_paths=[])
+        self._info = HostKeyInfo("192.168.1.100", 22, status, "ssh-ed25519", "SHA256:abc")  # type: ignore[arg-type]
+
+    def paths(self) -> list[str]:
+        return self._real.paths()
+
+    async def check(self, hostname: str, port: int) -> Any:
+        return self._info
+
+    def unverified_error(self, info: Any) -> Any:
+        return self._real.unverified_error(info)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [("unknown", RemoteHostKeyUnknownError), ("changed", RemoteHostKeyChangedError)],
+)
+async def test_connect_classifies_unverified_host_key(
+    device: RemoteDevice, status: str, expected: type[Exception]
+) -> None:
+    store = _FixedStatusStore(status)
+    with patch("asyncssh.connect", new_callable=AsyncMock) as mock_connect:
+        mock_connect.side_effect = asyncssh.HostKeyNotVerifiable("not verifiable")
+        transport = SSHTransport(device=device, known_hosts=store)  # type: ignore[arg-type]
+        with pytest.raises(expected) as info:
+            await transport.connect(timeout=5.0)
+
+    assert mock_connect.call_args.kwargs["known_hosts"] == store.paths()
+    assert info.value.details["fingerprint"] == "SHA256:abc"
