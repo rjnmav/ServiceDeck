@@ -129,7 +129,29 @@ class RemoteManager:
 
         req_id = self._get_next_id()
         request = RequestMessage(id=req_id, method=method, params=params or {})
-        response = await transport.send_request(request, timeout=timeout)
+        try:
+            response = await transport.send_request(request, timeout=timeout)
+        except RemoteConnectionError:
+            # Stale or broken transport detected: prune connection and attempt single reconnect retry
+            await self._connections.disconnect(device_id)
+            device = self._config.get_device(device_id)
+            if device is not None:
+                logger.info(
+                    "Connection to '%s' lost during '%s'; attempting automatic reconnection...",
+                    device_id,
+                    method,
+                )
+                try:
+                    await self._connections.connect(device)
+                    new_transport = self._connections.get_transport(device_id)
+                    if new_transport is not None:
+                        response = await new_transport.send_request(request, timeout=timeout)
+                    else:
+                        raise
+                except Exception:
+                    raise
+            else:
+                raise
 
         if not response.success:
             err = response.error

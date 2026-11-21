@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+from PySide6.QtCore import QThreadPool
+
 from servicedeck.api_client import ServiceDeckClient
 from servicedeck.api_client.models.common import ScopeInfo
 from servicedeck.api_client.models.remote import RemoteDevice
@@ -247,3 +249,33 @@ def test_main_window_remote_host_handling(qapp):
     win._on_target_host_changed(None)
     assert win._current_device_id is None
     assert "Local" in win.windowTitle()
+
+
+def test_main_window_scope_toggle_remote(qapp):
+    """Verify MainWindow toggles scope cleanly on remote host without race conditions."""
+    mock_client = MagicMock(spec=ServiceDeckClient)
+    mock_client.get_scope.return_value = ScopeInfo(active_scope="user", available_scopes=["user", "system"])
+    mock_client.list_devices.return_value = []
+    mock_client.list_services.return_value = [
+        Service(
+            name="cron.service",
+            description="Cron",
+            load_state="loaded",
+            active_state="active",
+            sub_state="running",
+            unit_file_state="enabled",
+            scope="system",
+        )
+    ]
+
+    win = MainWindow(client=mock_client)
+    qapp.processEvents()
+
+    win._current_device_id = "remote-node"
+    win._on_system_scope_toggled(True)
+    QThreadPool.globalInstance().waitForDone(2000)
+    qapp.processEvents()
+
+    assert win._current_scope == "system"
+    mock_client.list_services.assert_called_with(scope="system", device_id="remote-node")
+

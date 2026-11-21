@@ -1,6 +1,7 @@
 """Unit tests for SSHTransport wrapping asyncssh."""
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncssh
@@ -205,3 +206,51 @@ async def test_send_request_eof(device: RemoteDevice) -> None:
     req = RequestMessage(id=88, method="service.crash")
     with pytest.raises(RemoteConnectionError, match="disconnected unexpectedly"):
         await transport.send_request(req, timeout=1.0)
+
+
+async def test_send_request_concurrency_serialized(device: RemoteDevice) -> None:
+    """Verify that concurrent send_request calls are strictly serialized across stdio."""
+    encoder = ProtocolEncoder()
+    transport = SSHTransport(device=device)
+
+    mock_stdin = MockStreamWriter()
+    mock_stdout = asyncio.StreamReader()
+
+    mock_process = MagicMock()
+    mock_process.stdin = mock_stdin
+    mock_process.stdout = mock_stdout
+    mock_process.is_closing.return_value = False
+
+    transport._conn = MagicMock()
+    transport._process = mock_process
+
+    req1 = RequestMessage(id=1, method="service.resources")
+    resp1 = success_response(1, result={"cpu": 10})
+    resp1_bytes = encoder.encode(resp1)
+
+    req2 = RequestMessage(id=2, method="service.list")
+    resp2 = success_response(2, result=[{"name": "foo"}])
+    resp2_bytes = encoder.encode(resp2)
+
+    order: list[int] = []
+
+    async def call_req1() -> Any:
+        res = await transport.send_request(req1, timeout=5.0)
+        order.append(res.id)
+        return res
+
+    async def call_req2() -> Any:
+        await asyncio.sleep(0.01)
+        res = await transport.send_request(req2, timeout=5.0)
+        order.append(res.id)
+        return res
+
+    mock_stdout.feed_data(resp1_bytes + resp2_bytes)
+
+    r1, r2 = await asyncio.gather(call_req1(), call_req2())
+    assert r1.id == 1
+    assert r1.result == {"cpu": 10}
+    assert r2.id == 2
+    assert r2.result == [{"name": "foo"}]
+    assert order == [1, 2]
+

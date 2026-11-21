@@ -390,7 +390,16 @@ class MainWindow(QMainWindow):
         new_scope = "system" if is_system else "user"
         if new_scope == self._current_scope:
             return
+        if self._is_busy:
+            # Revert checkbox state if another operation is already in progress
+            self._toolbar.system_toggle.blockSignals(True)
+            self._toolbar.system_toggle.setChecked(self._current_scope == "system")
+            self._toolbar.system_toggle.blockSignals(False)
+            return
+
         self._detail_panel.clear()
+        if self._table_view.selectionModel():
+            self._table_view.selectionModel().clearSelection()
 
         device_id = self._current_device_id
 
@@ -405,10 +414,12 @@ class MainWindow(QMainWindow):
 
         def on_start() -> None:
             self._is_busy = True
+            self._toolbar.system_toggle.setEnabled(False)
             self.set_status(f"Switching to {new_scope} scope...")
 
         def on_success(result: tuple[str, list[Service]]) -> None:
             self._is_busy = False
+            self._toolbar.system_toggle.setEnabled(True)
             active_scope, services = result
             self._current_scope = active_scope
             self._populate_table(services)
@@ -418,6 +429,7 @@ class MainWindow(QMainWindow):
 
         def on_error(msg: str, exc: Any) -> None:
             self._is_busy = False
+            self._toolbar.system_toggle.setEnabled(True)
             # Revert checkbox state
             self._toolbar.system_toggle.blockSignals(True)
             self._toolbar.system_toggle.setChecked(self._current_scope == "system")

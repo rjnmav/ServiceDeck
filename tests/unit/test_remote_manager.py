@@ -261,3 +261,29 @@ async def test_health_check(
 
     healthy = await remote_manager.is_healthy("dev1")
     assert healthy is True
+
+
+async def test_execute_auto_reconnect_on_stale_connection(
+    remote_manager: RemoteManager, mock_conn_mgr: MagicMock, test_device: RemoteDevice
+) -> None:
+    # First transport fails with RemoteConnectionError
+    stale_transport = MagicMock()
+    stale_transport.is_connected = True
+    stale_transport.send_request = AsyncMock(
+        side_effect=RemoteConnectionError("Connection broke")
+    )
+
+    # Fresh transport succeeds
+    fresh_transport = MagicMock()
+    fresh_transport.is_connected = True
+    fresh_transport.send_request = AsyncMock(
+        return_value=success_response(2, result={"healthy": True})
+    )
+
+    mock_conn_mgr.get_transport.side_effect = [stale_transport, fresh_transport]
+
+    healthy = await remote_manager.is_healthy("dev1")
+    assert healthy is True
+    mock_conn_mgr.disconnect.assert_called_with("dev1")
+    mock_conn_mgr.connect.assert_called_with(test_device)
+

@@ -1,6 +1,7 @@
 """D-Bus connection management for both User and System buses using dbus-fast."""
 
 import logging
+import os
 from typing import Self
 
 from dbus_fast.aio import MessageBus
@@ -39,7 +40,17 @@ class DbusConnectionManager:
         try:
             if valid_scope == "user":
                 logger.info("Connecting to user session D-Bus")
-                self._user_bus = await MessageBus(bus_type=BusType.SESSION).connect()
+                try:
+                    self._user_bus = await MessageBus(bus_type=BusType.SESSION).connect()
+                except Exception as user_bus_err:
+                    user_socket = f"/run/user/{os.getuid()}/bus"
+                    if os.path.exists(user_socket):
+                        logger.info("Falling back to user D-Bus socket at %s", user_socket)
+                        self._user_bus = await MessageBus(
+                            bus_address=f"unix:path={user_socket}"
+                        ).connect()
+                    else:
+                        raise user_bus_err
                 logger.info("Connected to user session D-Bus successfully.")
                 return self._user_bus
             else:

@@ -44,6 +44,7 @@ class SSHTransport:
         self._process: asyncssh.SSHClientProcess | None = None
         self._hello: HelloMessage | None = None
         self._encoder = ProtocolEncoder()
+        self._lock = asyncio.Lock()
 
     @property
     def device(self) -> RemoteDevice:
@@ -156,47 +157,62 @@ class SSHTransport:
         request: RequestMessage,
         timeout: float = 30.0,
     ) -> ResponseMessage:
-        """Send a RequestMessage to the remote agent and await a correlating ResponseMessage."""
-        if not self.is_connected or self._process is None:
-            raise RemoteConnectionError(
-                f"Cannot send request {request.id}: connection to {self._device.hostname} is not open",
-                details={"request_id": request.id, "device_id": self._device.id},
-            )
+        """Send a RequestMessage to the remote agent and await a correlating ResponseMessage.
 
-        try:
-            await write_message(self._process.stdin, request)  # type: ignore[arg-type]
-        except Exception as exc:
-            logger.error("Failed to write request %d to remote agent: %s", request.id, exc)
-            raise RemoteConnectionError(
-                f"Failed to transmit request {request.id} to {self._device.hostname}: {exc}",
-                details={"request_id": request.id},
-            ) from exc
+        Serializes all traffic across the single SSH stdio channel via an asyncio mutex
+        to prevent frame interleaving and concurrent StreamReader reads.
+        """
+        async with self._lock:
+            if not self.is_connected or self._process is None:
+                raise RemoteConnectionError(
+                    f"Cannot send request {request.id}: connection to {self._device.hostname} is not open",
+                    details={"request_id": request.id, "device_id": self._device.id},
+                )
 
-        try:
-            response = await asyncio.wait_for(
-                read_message(self._process.stdout),  # type: ignore[arg-type]
-                timeout=timeout,
-            )
-        except TimeoutError as exc:
-            raise RemoteTimeoutError(
-                request_id=request.id,
-                method=request.method,
-                timeout_seconds=timeout,
-            ) from exc
+            try:
+                await write_message(self._process.stdin, request)  # type: ignore[arg-type]
+            except Exception as exc:
+                logger.error("Failed to write request %d to remote agent: %s", request.id, exc)
+                await self.disconnect()
+                raise RemoteConnectionError(
+                    f"Failed to transmit request {request.id} to {self._device.hostname}: {exc}",
+                    details={"request_id": request.id},
+                ) from exc
 
-        if response is None:
-            raise RemoteConnectionError(
-                f"Remote agent on {self._device.hostname} disconnected unexpectedly while awaiting response to request {request.id}",
-                details={"request_id": request.id},
-            )
+            try:
+                response = await asyncio.wait_for(
+                    read_message(self._process.stdout),  # type: ignore[arg-type]
+                    timeout=timeout,
+                )
+            except TimeoutError as exc:
+                await self.disconnect()
+                raise RemoteTimeoutError(
+                    request_id=request.id,
+                    method=request.method,
+                    timeout_seconds=timeout,
+                ) from exc
+            except Exception as exc:
+                await self.disconnect()
+                raise RemoteConnectionError(
+                    f"Failed to read response to request {request.id} from {self._device.hostname}: {exc}",
+                    details={"request_id": request.id},
+                ) from exc
 
-        if not isinstance(response, ResponseMessage):
-            raise RemoteProtocolError(
-                f"Unexpected message type received in reply to request {request.id}: {type(response).__name__}",
-                details={"received_type": type(response).__name__},
-            )
+            if response is None:
+                await self.disconnect()
+                raise RemoteConnectionError(
+                    f"Remote agent on {self._device.hostname} disconnected unexpectedly while awaiting response to request {request.id}",
+                    details={"request_id": request.id},
+                )
 
-        return response
+            if not isinstance(response, ResponseMessage):
+                await self.disconnect()
+                raise RemoteProtocolError(
+                    f"Unexpected message type received in reply to request {request.id}: {type(response).__name__}",
+                    details={"received_type": type(response).__name__},
+                )
+
+            return response
 
     async def disconnect(self) -> None:
         """Gracefully terminate agent session and close SSH connection."""
