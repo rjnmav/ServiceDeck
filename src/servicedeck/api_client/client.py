@@ -136,6 +136,25 @@ class ServiceDeckClient:
         )
         return KeySetupInfo.from_dict(data)
 
+    def elevate_device(self, device_id: str, password: str | None = None) -> bool:
+        """Get administrator (root via sudo) access on the device for this connection.
+
+        ``password`` is the remote sudo password; it goes only to the local backend, which
+        uses it once and never stores it. ``None`` tries passwordless sudo.
+        """
+        body = {"password": password} if password is not None else {}
+        data = self.transport.request(
+            "POST",
+            f"/api/remote/devices/{device_id}/elevate",
+            json=body,
+            timeout=ONBOARDING_TIMEOUT,
+        )
+        return bool(data.get("elevated", False))
+
+    def drop_device_privileges(self, device_id: str) -> None:
+        """Stop the device's root agent; system-service changes need elevation again."""
+        self.transport.request("POST", f"/api/remote/devices/{device_id}/drop-privileges")
+
     def disconnect_device(self, device_id: str) -> None:
         """Terminate the SSH transport session to the specified device."""
         self.transport.request("POST", f"/api/remote/devices/{device_id}/disconnect")

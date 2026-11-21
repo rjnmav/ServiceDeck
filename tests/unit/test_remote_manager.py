@@ -41,6 +41,7 @@ def mock_conn_mgr() -> MagicMock:
     conn_mgr.disconnect = AsyncMock()
     conn_mgr.disconnect_all = AsyncMock()
     conn_mgr.is_connected = MagicMock(return_value=False)
+    conn_mgr.is_elevated = MagicMock(return_value=False)
     conn_mgr.list_connected = MagicMock(return_value=[])
     conn_mgr.get_transport = MagicMock(return_value=None)
     return conn_mgr

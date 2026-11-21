@@ -42,6 +42,7 @@ class RemoteConnectionInfo:
     remote_user: str | None = None
     remote_uid: int | None = None
     remote_version: str | None = None
+    elevated: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RemoteConnectionInfo":
@@ -53,6 +54,7 @@ class RemoteConnectionInfo:
             remote_user=str(data["remote_user"]) if data.get("remote_user") else None,
             remote_uid=int(data["remote_uid"]) if data.get("remote_uid") is not None else None,
             remote_version=str(data["remote_version"]) if data.get("remote_version") else None,
+            elevated=bool(data.get("elevated", False)),
         )
 
 

@@ -1,6 +1,7 @@
 """Dialog for authoring, editing, and installing systemd service unit files matching original ServiceDeck."""
 
 import re
+from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtGui import QFont
@@ -21,6 +22,10 @@ from PySide6.QtWidgets import (
 
 from servicedeck.api_client import ServiceDeckClient
 from servicedeck.api_client.models.service import CreatedService
+from servicedeck.gui.views.dialogs.remote_onboarding import (
+    handle_elevation_error,
+    needs_elevation,
+)
 from servicedeck.gui.workers.service_worker import run_async_task
 
 DEFAULT_SERVICE_TEMPLATE = (
@@ -48,7 +53,11 @@ class CreateServiceDialog(QDialog):
         client: ServiceDeckClient | None = None,
         default_scope: str = "user",
         device_id: str | None = None,
+        target: str | None = None,
+        on_elevated: Callable[[], None] | None = None,
     ) -> None:
+        """``target`` (``user@host``) labels the sudo prompt; ``on_elevated`` is called when
+        administrator access is obtained on ``device_id`` so the caller can show it."""
         super().__init__(parent)
         self.setWindowTitle("Create New Service")
         self.setMinimumSize(850, 550)
@@ -56,6 +65,8 @@ class CreateServiceDialog(QDialog):
         self._client = client
         self._default_scope = default_scope
         self._device_id = device_id
+        self._target = target or device_id or "this host"
+        self._on_elevated = on_elevated
 
         self._setup_ui()
 
@@ -386,9 +397,17 @@ class CreateServiceDialog(QDialog):
             self.accept()
             return
 
+        self._submit(name, content_text, scope)
+
+    def _submit(self, name: str, content_text: str, scope: str, *, _elevated: bool = False) -> None:
+        """Create the unit; on a remote host, get administrator access once if needed."""
+        assert self._client is not None
+        client = self._client
+        device_id = self._device_id
+
         def task() -> CreatedService:
-            return self._client.create_service(
-                name=name, content=content_text, scope=scope, device_id=self._device_id
+            return client.create_service(
+                name=name, content=content_text, scope=scope, device_id=device_id
             )
 
         def on_start() -> None:
@@ -406,7 +425,7 @@ class CreateServiceDialog(QDialog):
             )
             self.accept()
 
-        def on_error(msg: str, exc: Any) -> None:
+        def show_failure(msg: str) -> None:
             self._create_btn.setEnabled(True)
             self._create_btn.setText("Create")
             QMessageBox.critical(
@@ -414,5 +433,21 @@ class CreateServiceDialog(QDialog):
                 "Creation Failed",
                 f"Failed to create service '{name}':\n\n{msg}",
             )
+
+        def on_error(msg: str, exc: Any) -> None:
+            if device_id is not None and not _elevated and needs_elevation(exc):
+                self._create_btn.setText("Waiting for administrator access...")
+                handle_elevation_error(
+                    self,
+                    client,
+                    device_id,
+                    exc,
+                    target=self._target,
+                    retry=lambda: self._submit(name, content_text, scope, _elevated=True),
+                    on_give_up=show_failure,
+                    on_elevated=self._on_elevated,
+                )
+                return
+            show_failure(msg)
 
         run_async_task(task, on_start=on_start, on_success=on_success, on_error=on_error)

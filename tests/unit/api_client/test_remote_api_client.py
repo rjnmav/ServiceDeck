@@ -157,3 +157,25 @@ async def test_async_remote_services_routing() -> None:
     client = create_mock_async_client(handler)
     svc = await client.get_service("ssh.service", device_id="node1")
     assert svc.name == "ssh.service"
+
+
+def test_sync_elevate_and_drop_privileges() -> None:
+    seen: list[tuple[str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.content))
+        if request.url.path.endswith("/elevate"):
+            return httpx.Response(200, json={"device_id": "srv1", "elevated": True})
+        if request.url.path.endswith("/drop-privileges"):
+            return httpx.Response(200, json={"device_id": "srv1", "elevated": False})
+        return httpx.Response(404)
+
+    client = create_mock_sync_client(handler)
+    assert client.elevate_device("srv1", "pw") is True
+    assert client.elevate_device("srv1") is True
+    client.drop_device_privileges("srv1")
+
+    assert seen[0] == ("/api/remote/devices/srv1/elevate", b'{"password":"pw"}')
+    assert seen[1] == ("/api/remote/devices/srv1/elevate", b"{}")
+    assert seen[2][0] == "/api/remote/devices/srv1/drop-privileges"
+    assert RemoteConnectionInfo.from_dict({"device_id": "x", "elevated": True}).elevated is True

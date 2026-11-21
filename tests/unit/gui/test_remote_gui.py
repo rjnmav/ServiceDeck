@@ -1,5 +1,6 @@
 """Unit tests for remote host GUI components and integration."""
 
+from typing import Any
 from unittest.mock import MagicMock
 
 from PySide6.QtCore import QThreadPool
@@ -279,3 +280,10 @@ def test_main_window_scope_toggle_remote(qapp):
     assert win._current_scope == "system"
     mock_client.list_services.assert_called_with(scope="system", device_id="remote-node")
 
+
+
+def test_add_remote_device_dialog_agent_mode_defaults_to_bundled(qapp: Any) -> None:
+    dlg = AddRemoteDeviceDialog()
+    assert dlg._agent_mode_combo.currentData() == "bundled"
+    modes = [dlg._agent_mode_combo.itemData(i) for i in range(dlg._agent_mode_combo.count())]
+    assert modes == ["bundled", "installed", "auto"]

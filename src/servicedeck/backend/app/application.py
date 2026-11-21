@@ -22,9 +22,12 @@ from servicedeck.backend.exceptions import (
     RemoteConnectionError,
     RemoteDeviceNotTrustedError,
     RemoteDeviceRevokedError,
+    RemoteElevationRequiredError,
     RemoteHostKeyChangedError,
     RemoteHostKeyUnknownError,
     RemoteKeySetupError,
+    RemoteSudoAuthError,
+    RemoteSudoUnavailableError,
     ServiceDeckError,
     ServiceNotFoundError,
     ServiceOperationError,
@@ -190,6 +193,43 @@ def create_app(
             status_code=status.HTTP_409_CONFLICT,
             content=ErrorDetail(
                 error="RemoteHostKeyUnknownError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteElevationRequiredError)
+    async def remote_elevation_required_handler(
+        request: Request, exc: RemoteElevationRequiredError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content=ErrorDetail(
+                error="RemoteElevationRequiredError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteSudoAuthError)
+    async def remote_sudo_auth_handler(request: Request, exc: RemoteSudoAuthError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content=ErrorDetail(
+                error="RemoteSudoAuthError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteSudoUnavailableError)
+    async def remote_sudo_unavailable_handler(
+        request: Request, exc: RemoteSudoUnavailableError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content=ErrorDetail(
+                error="RemoteSudoUnavailableError",
                 message=exc.message,
                 details=exc.details,
             ).model_dump(),

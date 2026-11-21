@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMenuBar,
     QMessageBox,
+    QPushButton,
     QTableView,
 )
 
@@ -34,7 +35,9 @@ from servicedeck.gui.views.dialogs.manage_remote_devices_dialog import (
 from servicedeck.gui.views.dialogs.preferences_dialog import PreferencesDialog
 from servicedeck.gui.views.dialogs.remote_onboarding import (
     MAX_ONBOARDING_STEPS,
+    handle_elevation_error,
     handle_onboarding_error,
+    needs_elevation,
 )
 from servicedeck.gui.views.service_detail_panel import ServiceDetailPanel
 from servicedeck.gui.views.service_toolbar import ServiceToolbar
@@ -53,6 +56,8 @@ class MainWindow(QMainWindow):
         self._devices: list[RemoteDevice] = []
         self._is_busy = False
         self._onboarding_steps = 0
+        # Devices with a running administrator (root) agent, as last reported by the backend.
+        self._elevated_devices: set[str] = set()
         self._log_refresh_interval = 5
         self._resource_refresh_interval = 2
 
@@ -147,11 +152,24 @@ class MainWindow(QMainWindow):
             self._count_label = QLabel("0 services")
             self._count_label.setObjectName("serviceCount")
 
+            self._admin_button = QPushButton("Admin  \u2715")
+            self._admin_button.setObjectName("adminSessionButton")
+            self._admin_button.setFlat(True)
+            self._admin_button.setToolTip(
+                "System services on this host are managed with administrator access.\n"
+                "Click to drop administrator access."
+            )
+            self._admin_button.clicked.connect(self._on_drop_admin_clicked)
+            self._admin_button.hide()
+
             status_bar.addWidget(self._status_label, 1)
+            status_bar.addPermanentWidget(self._admin_button)
             status_bar.addPermanentWidget(self._count_label)
         else:
             self._status_label = QLabel()
             self._count_label = QLabel()
+            self._admin_button = QPushButton()
+            self._admin_button.hide()
 
     def _connect_signals(self) -> None:
         # Toolbar actions
@@ -162,7 +180,7 @@ class MainWindow(QMainWindow):
         self._toolbar.disable_action.triggered.connect(self._on_disable_clicked)
         self._toolbar.mask_action.triggered.connect(self._on_mask_clicked)
         self._toolbar.unmask_action.triggered.connect(self._on_unmask_clicked)
-        self._toolbar.reload_action.triggered.connect(self._on_reload_daemon_clicked)
+        self._toolbar.reload_action.triggered.connect(lambda: self._on_reload_daemon_clicked())
 
         self._toolbar.refresh_action.setShortcut(QKeySequence.StandardKey.Refresh)
         self._toolbar.refresh_action.triggered.connect(self.request_service_list)
@@ -308,8 +326,10 @@ class MainWindow(QMainWindow):
         )
         return reply == QMessageBox.StandardButton.Yes
 
-    def _execute_service_op(self, op_name: str, fn: Any, *args: Any) -> None:
-        name = self._selected_service_name()
+    def _execute_service_op(
+        self, op_name: str, fn: Any, *args: Any, name: str | None = None, _elevated: bool = False
+    ) -> None:
+        name = name or self._selected_service_name()
         if not name or self._is_busy:
             return
 
@@ -332,6 +352,18 @@ class MainWindow(QMainWindow):
 
         def on_error(msg: str, exc: Any) -> None:
             self._is_busy = False
+            if device_id is not None and not _elevated and needs_elevation(exc):
+                self._elevated_devices.discard(device_id)
+                self._update_admin_indicator()
+                self._toolbar.set_actions_enabled(True)
+                self._request_elevation(
+                    device_id,
+                    exc,
+                    retry=lambda: self._execute_service_op(
+                        op_name, fn, *args, name=name, _elevated=True
+                    ),
+                )
+                return
             err_lower = msg.lower()
             if (
                 "authentication" in err_lower
@@ -339,10 +371,7 @@ class MainWindow(QMainWindow):
                 or "denied" in err_lower
                 or "not authorized" in err_lower
             ):
-                self.set_status(
-                    f"Permission denied {op_name}ing '{name}'. Privileged operations on remote hosts require system elevation.",
-                    success=False,
-                )
+                self.set_status(f"Permission denied {op_name}ing '{name}': {msg}", success=False)
             else:
                 self.set_status(f"Error {op_name}ing '{name}': {msg}", success=False)
             self._toolbar.set_actions_enabled(True)
@@ -381,7 +410,7 @@ class MainWindow(QMainWindow):
         if name and self._confirm_action("unmask", name):
             self._execute_service_op("unmask", self.client.unmask_service)
 
-    def _on_reload_daemon_clicked(self) -> None:
+    def _on_reload_daemon_clicked(self, _elevated: bool = False) -> None:
         if self._is_busy:
             return
 
@@ -402,6 +431,11 @@ class MainWindow(QMainWindow):
 
         def on_error(msg: str, exc: Any) -> None:
             self._is_busy = False
+            if device_id is not None and not _elevated and needs_elevation(exc):
+                self._request_elevation(
+                    device_id, exc, retry=lambda: self._on_reload_daemon_clicked(_elevated=True)
+                )
+                return
             self.set_status(f"Failed to reload daemon: {msg}", success=False)
 
         run_async_task(task, on_start=on_start, on_success=on_success, on_error=on_error)
@@ -412,6 +446,12 @@ class MainWindow(QMainWindow):
             client=self.client,
             default_scope=self._current_scope,
             device_id=self._current_device_id,
+            target=(
+                self._device_target(self._current_device_id)
+                if self._current_device_id is not None
+                else None
+            ),
+            on_elevated=self._mark_current_device_elevated,
         )
         if dlg.exec():
             self.request_service_list()
@@ -485,9 +525,59 @@ class MainWindow(QMainWindow):
             host_name = self._get_host_display_name()
             self.setWindowTitle(f"ServiceDeck — Systemd Service Manager [{host_name}]")
 
+    def _request_elevation(self, device_id: str, exc: Any, *, retry: Any) -> None:
+        """Get administrator access on ``device_id`` (asking for sudo), then ``retry``."""
+        self.set_status(f"Requesting administrator access on {self._get_host_display_name()}...")
+
+        def elevated() -> None:
+            self._elevated_devices.add(device_id)
+            self._update_admin_indicator()
+
+        handle_elevation_error(
+            self,
+            self.client,
+            device_id,
+            exc,
+            target=self._device_target(device_id),
+            retry=retry,
+            on_give_up=lambda reason: self.set_status(
+                f"Administrator access not granted: {reason}", success=False
+            ),
+            on_elevated=elevated,
+        )
+
+    def _mark_current_device_elevated(self) -> None:
+        if self._current_device_id is not None:
+            self._elevated_devices.add(self._current_device_id)
+            self._update_admin_indicator()
+
+    def _update_admin_indicator(self) -> None:
+        device_id = self._current_device_id
+        self._admin_button.setVisible(device_id is not None and device_id in self._elevated_devices)
+
+    def _on_drop_admin_clicked(self) -> None:
+        device_id = self._current_device_id
+        if device_id is None:
+            return
+
+        def done(_result: Any = None) -> None:
+            self._elevated_devices.discard(device_id)
+            self._update_admin_indicator()
+            self.set_status("Administrator access dropped.", success=True)
+
+        run_async_task(
+            self.client.drop_device_privileges,
+            device_id,
+            on_success=done,
+            on_error=lambda msg, _exc: self.set_status(
+                f"Failed to drop administrator access: {msg}", success=False
+            ),
+        )
+
     def _on_target_host_changed(self, device_id: str | None) -> None:
         """Switch target host and refresh service inventory."""
         self._current_device_id = device_id
+        self._update_admin_indicator()
         self._update_window_title()
         self._detail_panel.clear()
         self.request_service_list()
@@ -521,6 +611,7 @@ class MainWindow(QMainWindow):
                     target_id = None
 
             self._current_device_id = target_id
+            self._update_admin_indicator()
             self._update_window_title()
             self._toolbar.set_hosts(devices, self._current_device_id)
             self._detail_panel.clear()

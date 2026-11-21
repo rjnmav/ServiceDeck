@@ -6,6 +6,7 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -22,6 +23,13 @@ from servicedeck.api_client import ServiceDeckClient
 from servicedeck.api_client.models.remote import KeySetupInfo, RemoteConnectionInfo, RemoteDevice
 from servicedeck.gui.views.dialogs.remote_onboarding import connect_with_onboarding
 from servicedeck.gui.workers.service_worker import run_async_task
+
+#: (label, agent_mode) choices; the first is the default.
+AGENT_MODES = (
+    ("Bundled (nothing installed remotely)", "bundled"),
+    ("Installed servicedeck-remote", "installed"),
+    ("Auto (prefer installed)", "auto"),
+)
 
 
 class AddRemoteDeviceDialog(QDialog):
@@ -99,6 +107,17 @@ class AddRemoteDeviceDialog(QDialog):
         key_layout.addWidget(self._key_edit)
         key_layout.addWidget(key_browse_btn)
         form_layout.addRow("Private Key:", key_layout)
+
+        # How the agent reaches the remote host
+        self._agent_mode_combo = QComboBox(self)
+        for label, mode in AGENT_MODES:
+            self._agent_mode_combo.addItem(label, mode)
+        self._agent_mode_combo.setToolTip(
+            "Bundled: ServiceDeck sends its agent over SSH; nothing is installed remotely.\n"
+            "Installed: run servicedeck-remote already installed on the host.\n"
+            "Auto: use the installed agent when present, otherwise the bundled one."
+        )
+        form_layout.addRow("Agent:", self._agent_mode_combo)
 
         layout.addLayout(form_layout)
 
@@ -232,6 +251,7 @@ class AddRemoteDeviceDialog(QDialog):
             port=port,
             username=user,
             ssh_key_path=key,
+            agent_mode=self._agent_mode_combo.currentData(),
             on_success=on_registered,
             on_error=on_error,
         )
@@ -304,6 +324,7 @@ class AddRemoteDeviceDialog(QDialog):
             username=user,
             display_name=name,
             ssh_key_path=key,
+            agent_mode=self._agent_mode_combo.currentData(),
             on_success=on_registered,
             on_error=on_register_error,
         )

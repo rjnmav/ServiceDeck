@@ -124,6 +124,29 @@ class RemoteAgentBootstrapError(RemoteConnectionError):
     """
 
 
+class RemoteSudoAuthError(RemoteConnectionError):
+    """Raised when sudo on the remote host rejects (or needs) the administrator password.
+
+    ``details["password_required"]`` is True when no password was supplied and sudo asked
+    for one, so the client knows to prompt rather than report a wrong password.
+    """
+
+
+class RemoteSudoUnavailableError(RemoteConnectionError):
+    """Raised when administrator access via sudo is impossible on the remote host.
+
+    Typical causes: sudo is not installed, the user is not in sudoers, or sudoers sets
+    ``requiretty``.
+    """
+
+
+class RemoteElevationRequiredError(AuthenticationRequiredError):
+    """Raised when a system-scope operation on a remote device needs administrator access.
+
+    The client should obtain it with the device's ``elevate`` endpoint and retry.
+    """
+
+
 class RemoteDeviceNotTrustedError(ServiceDeckError):
     """Raised when attempting to operate on a remote device that is not trusted/paired."""
 

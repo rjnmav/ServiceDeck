@@ -53,6 +53,9 @@ class RemoteConnectionResponse(BaseModel):
     remote_user: str | None = None
     remote_uid: int | None = None
     remote_version: str | None = None
+    elevated: bool = Field(
+        False, description="True while system-scope calls run as root through sudo"
+    )
 
 
 class RemoteDeviceDisconnectResponse(BaseModel):
@@ -96,6 +99,27 @@ class SetupKeyRequest(BaseModel):
     )
 
 
+class ElevateRequest(BaseModel):
+    """sudo password for administrator access on the remote host."""
+
+    model_config = ConfigDict(frozen=True)
+
+    password: SecretStr | None = Field(
+        None,
+        description="Remote sudo password, used once to start the root agent and never "
+        "stored or logged. Omit to try passwordless sudo.",
+    )
+
+
+class ElevationResponse(BaseModel):
+    """Administrator access state of a remote device."""
+
+    model_config = ConfigDict(frozen=True)
+
+    device_id: str
+    elevated: bool
+
+
 class SetupKeyResponse(BaseModel):
     """Result of installing the SSH login key on a remote device."""
 
@@ -108,6 +132,8 @@ class SetupKeyResponse(BaseModel):
 
 
 __all__ = [
+    "ElevateRequest",
+    "ElevationResponse",
     "HostKeyResponse",
     "RemoteConnectionResponse",
     "RemoteDeviceCreateRequest",

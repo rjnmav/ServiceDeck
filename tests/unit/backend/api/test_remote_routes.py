@@ -31,6 +31,7 @@ def mock_remote_manager() -> MagicMock:
     mgr.disconnect = AsyncMock()
     mgr.disconnect_all = AsyncMock()
     mgr.is_connected = MagicMock(return_value=False)
+    mgr.is_elevated = MagicMock(return_value=False)
     mgr.list_connected = MagicMock(return_value=[])
     mgr.list_services = AsyncMock()
     mgr.get_service = AsyncMock()
@@ -382,3 +383,71 @@ async def test_setup_key_wrong_password_returns_401(
     assert resp.status_code == 401
     assert resp.json()["error"] == "SSHAuthenticationError"
     assert "hunter2-secret" not in resp.text
+
+
+# --- Administrator access (sudo elevation) ---
+
+
+async def test_elevate_passes_password_once_and_never_echoes_it(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
+    mock_remote_manager.elevate = AsyncMock(return_value=HelloMessage(host="h", user="root", uid=0))
+    mock_remote_manager.is_elevated = MagicMock(return_value=True)
+
+    resp = await remote_client.post(
+        "/api/remote/devices/srv/elevate", json={"password": "sudo-secret"}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"device_id": "srv", "elevated": True}
+    assert "sudo-secret" not in resp.text
+    mock_remote_manager.elevate.assert_awaited_once_with("srv", "sudo-secret")
+
+
+async def test_elevate_without_password_tries_passwordless_sudo(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
+    mock_remote_manager.elevate = AsyncMock()
+    resp = await remote_client.post("/api/remote/devices/srv/elevate", json={})
+    assert resp.status_code == 200
+    mock_remote_manager.elevate.assert_awaited_once_with("srv", None)
+
+
+async def test_elevate_wrong_password_returns_401(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
+    from servicedeck.backend.exceptions import RemoteSudoAuthError
+
+    mock_remote_manager.elevate = AsyncMock(
+        side_effect=RemoteSudoAuthError("rejected", details={"password_required": False})
+    )
+    resp = await remote_client.post(
+        "/api/remote/devices/srv/elevate", json={"password": "sudo-secret"}
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "RemoteSudoAuthError"
+    assert "sudo-secret" not in resp.text
+
+
+async def test_system_action_needing_root_returns_403_elevation_required(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
+    from servicedeck.backend.exceptions import RemoteElevationRequiredError
+
+    mock_remote_manager.restart_service = AsyncMock(
+        side_effect=RemoteElevationRequiredError(
+            "Administrator access is required.", details={"device_id": "srv"}
+        )
+    )
+    resp = await remote_client.post(
+        "/api/remote/srv/services/nginx.service/restart", params={"scope": "system"}
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"] == "RemoteElevationRequiredError"
+
+
+async def test_drop_privileges(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
+    mock_remote_manager.drop_privileges = AsyncMock()
+    resp = await remote_client.post("/api/remote/devices/srv/drop-privileges")
+    assert resp.status_code == 200
+    assert resp.json()["elevated"] is False
+    mock_remote_manager.drop_privileges.assert_awaited_once_with("srv")

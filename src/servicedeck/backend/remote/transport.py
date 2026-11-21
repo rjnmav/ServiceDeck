@@ -22,8 +22,10 @@ from servicedeck.backend.remote.bundle import (
     get_agent_payload,
     stage1_command,
 )
+from servicedeck.backend.remote.channel import drain_stderr, exchange_request
 from servicedeck.backend.remote.device_config import RemoteDevice
 from servicedeck.backend.remote.known_hosts import KnownHostsStore
+from servicedeck.backend.remote.privileged import PrivilegedAgent
 from servicedeck.remote.exceptions import RemoteProtocolError, RemoteTimeoutError
 from servicedeck.remote.models import (
     GoodbyeMessage,
@@ -34,8 +36,6 @@ from servicedeck.remote.models import (
 from servicedeck.remote.protocol import ProtocolEncoder, read_message, write_message
 
 logger = logging.getLogger(__name__)
-#: Receives the remote agent's stderr, line by line.
-agent_logger = logging.getLogger("servicedeck.remote.agent")
 
 _STDERR_TAIL_LINES = 20
 
@@ -64,6 +64,7 @@ class SSHTransport:
         self._launch_mode: str | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=_STDERR_TAIL_LINES)
+        self._privileged: PrivilegedAgent | None = None
 
     @property
     def device(self) -> RemoteDevice:
@@ -248,25 +249,7 @@ class SSHTransport:
         )
 
     async def _drain_stderr(self, stream: Any) -> None:
-        try:
-            while True:
-                line = await stream.readline()
-                if not line:
-                    return
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if not text:
-                    continue
-                self._stderr_tail.append(text)
-                level = (
-                    logging.WARNING
-                    if any(tag in text for tag in ("[ERROR]", "[CRITICAL]", "Traceback"))
-                    else logging.DEBUG
-                )
-                agent_logger.log(level, "[%s] %s", self._device.id, text)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.debug("Stopped reading remote stderr for %s: %s", self._device.id, exc)
+        await drain_stderr(stream, self._device.id, self._stderr_tail)
 
     async def _bootstrap_failure(self, reason: str) -> RemoteAgentBootstrapError:
         """Collect exit status and stderr, tear down, and build a descriptive error."""
@@ -335,55 +318,69 @@ class SSHTransport:
                     f"Cannot send request {request.id}: connection to {self._device.hostname} is not open",
                     details={"request_id": request.id, "device_id": self._device.id},
                 )
-
             try:
-                await write_message(self._process.stdin, request)  # type: ignore[arg-type]
-            except Exception as exc:
-                logger.error("Failed to write request %d to remote agent: %s", request.id, exc)
-                await self.disconnect()
-                raise RemoteConnectionError(
-                    f"Failed to transmit request {request.id} to {self._device.hostname}: {exc}",
-                    details={"request_id": request.id},
-                ) from exc
-
-            try:
-                response = await asyncio.wait_for(
-                    read_message(self._process.stdout),  # type: ignore[arg-type]
-                    timeout=timeout,
+                return await exchange_request(
+                    self._process, request, timeout, self._device.hostname
                 )
-            except TimeoutError as exc:
+            except Exception:
                 await self.disconnect()
-                raise RemoteTimeoutError(
-                    request_id=request.id,
-                    method=request.method,
-                    timeout_seconds=timeout,
-                ) from exc
-            except Exception as exc:
-                await self.disconnect()
-                raise RemoteConnectionError(
-                    f"Failed to read response to request {request.id} from {self._device.hostname}: {exc}",
-                    details={"request_id": request.id},
-                ) from exc
+                raise
 
-            if response is None:
-                await self.disconnect()
-                raise RemoteConnectionError(
-                    f"Remote agent on {self._device.hostname} disconnected unexpectedly while awaiting response to request {request.id}",
-                    details={"request_id": request.id},
-                )
+    # --- Administrator (root) agent ---
 
-            if not isinstance(response, ResponseMessage):
-                await self.disconnect()
-                raise RemoteProtocolError(
-                    f"Unexpected message type received in reply to request {request.id}: {type(response).__name__}",
-                    details={"received_type": type(response).__name__},
-                )
+    @property
+    def is_elevated(self) -> bool:
+        """True while a root agent is running for this connection."""
+        return self.is_connected and self._privileged is not None and self._privileged.is_alive
 
-            return response
+    async def elevate(self, password: str | None, timeout: float = 30.0) -> HelloMessage:
+        """Start a root agent through sudo on this connection (no-op if already running).
+
+        ``password`` is used once to answer sudo and is not kept. ``None`` tries
+        passwordless sudo (``sudo -n``).
+        """
+        if self.is_elevated:
+            assert self._privileged is not None and self._privileged.hello is not None
+            return self._privileged.hello
+        if not self.is_connected or self._conn is None:
+            raise RemoteConnectionError(
+                f"Cannot get administrator access: {self._device.hostname} is not connected",
+                details={"device_id": self._device.id},
+            )
+        await self.drop_privileges()
+        agent = PrivilegedAgent(
+            self._conn,
+            hostname=self._device.hostname,
+            label=self._device.id,
+            launch_mode=self._launch_mode or "bundled",
+            remote_command=self._remote_command,
+        )
+        hello = await agent.start(password, timeout=timeout)
+        self._privileged = agent
+        return hello
+
+    async def send_privileged_request(
+        self, request: RequestMessage, timeout: float = 30.0
+    ) -> ResponseMessage:
+        """Send ``request`` to the root agent; fails if administrator access has ended."""
+        if not self.is_elevated or self._privileged is None:
+            raise RemoteConnectionError(
+                f"No administrator session is open on {self._device.hostname}",
+                details={"device_id": self._device.id},
+            )
+        return await self._privileged.send_request(request, timeout=timeout)
+
+    async def drop_privileges(self) -> None:
+        """Stop the root agent, if any. The normal agent keeps running."""
+        agent, self._privileged = self._privileged, None
+        if agent is not None:
+            await agent.close()
+            logger.info("Administrator access on %s dropped", self._device.hostname)
 
     async def disconnect(self) -> None:
         """Gracefully terminate agent session and close SSH connection."""
         logger.info("Disconnecting from %s (%s)", self._device.display_name, self._device.hostname)
+        await self.drop_privileges()
 
         if self._process is not None and not self._process.is_closing():
             try:

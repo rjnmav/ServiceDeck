@@ -6,6 +6,8 @@ from servicedeck.backend.api.dependencies import RemoteManagerDep
 from servicedeck.backend.remote.device_config import RemoteDevice
 from servicedeck.backend.remote.known_hosts import HostKeyInfo
 from servicedeck.backend.schemas.remote import (
+    ElevateRequest,
+    ElevationResponse,
     HostKeyResponse,
     RemoteConnectionResponse,
     RemoteDeviceCreateRequest,
@@ -108,6 +110,7 @@ async def connect_device(
         remote_user=hello.user,
         remote_uid=hello.uid,
         remote_version=hello.servicedeck_version,
+        elevated=remote_manager.is_elevated(device_id),
     )
 
 
@@ -146,6 +149,7 @@ async def get_device_status(
         remote_user=hello.user if hello else None,
         remote_uid=hello.uid if hello else None,
         remote_version=hello.servicedeck_version if hello else None,
+        elevated=remote_manager.is_elevated(device_id),
     )
 
 
@@ -215,3 +219,35 @@ async def setup_key(
         key_fingerprint=result.key.fingerprint,
         added=result.added,
     )
+
+
+@router.post(
+    "/{device_id}/elevate",
+    response_model=ElevationResponse,
+    summary="Get Administrator Access",
+    description="Start a root agent on the device through sudo so system services can be "
+    "managed for the rest of this connection. The password answers sudo once and is never "
+    "stored or logged; omit it to try passwordless sudo.",
+)
+async def elevate_device(
+    device_id: str,
+    payload: ElevateRequest,
+    remote_manager: RemoteManagerDep,
+) -> ElevationResponse:
+    password = payload.password.get_secret_value() if payload.password is not None else None
+    await remote_manager.elevate(device_id, password)
+    del password
+    return ElevationResponse(device_id=device_id, elevated=remote_manager.is_elevated(device_id))
+
+
+@router.post(
+    "/{device_id}/drop-privileges",
+    response_model=ElevationResponse,
+    summary="Drop Administrator Access",
+    description="Stop the device's root agent. The normal connection stays open.",
+)
+async def drop_device_privileges(
+    device_id: str, remote_manager: RemoteManagerDep
+) -> ElevationResponse:
+    await remote_manager.drop_privileges(device_id)
+    return ElevationResponse(device_id=device_id, elevated=remote_manager.is_elevated(device_id))

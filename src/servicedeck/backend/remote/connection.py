@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from servicedeck.backend.exceptions import RemoteConnectionError
 from servicedeck.backend.remote.device_config import RemoteDevice
 from servicedeck.backend.remote.known_hosts import KnownHostsStore
 from servicedeck.backend.remote.transport import SSHTransport
@@ -67,6 +68,28 @@ class RemoteConnectionManager:
         hello = await transport.connect(timeout=timeout)
         self._transports[device.id] = transport
         return hello
+
+    def is_elevated(self, device_id: str) -> bool:
+        """Return True if device_id has a running administrator (root) agent."""
+        transport = self._transports.get(device_id)
+        return transport is not None and transport.is_elevated
+
+    async def elevate(
+        self, device_id: str, password: str | None, timeout: float = 30.0
+    ) -> HelloMessage:
+        """Start the root agent for an already-connected device."""
+        transport = self.get_transport(device_id)
+        if transport is None:
+            raise RemoteConnectionError(
+                f"Device '{device_id}' is not connected.", details={"device_id": device_id}
+            )
+        return await transport.elevate(password, timeout=timeout)
+
+    async def drop_privileges(self, device_id: str) -> None:
+        """Stop the root agent for device_id, keeping the normal connection."""
+        transport = self._transports.get(device_id)
+        if transport is not None:
+            await transport.drop_privileges()
 
     async def disconnect(self, device_id: str) -> None:
         """Disconnect and remove transport for device_id."""

@@ -23,6 +23,9 @@ from servicedeck.gui.workers.service_worker import run_async_task
 HOST_KEY_UNKNOWN = "RemoteHostKeyUnknownError"
 HOST_KEY_CHANGED = "RemoteHostKeyChangedError"
 AUTH_FAILED = "SSHAuthenticationError"
+ELEVATION_REQUIRED = "RemoteElevationRequiredError"
+SUDO_AUTH_FAILED = "RemoteSudoAuthError"
+SUDO_UNAVAILABLE = "RemoteSudoUnavailableError"
 
 MAX_PASSWORD_ATTEMPTS = 3
 # Upper bound on trust/setup/retry rounds for one operation, so a misbehaving server
@@ -78,6 +81,30 @@ def ask_password(parent: QWidget | None, target: str, retry_message: str | None)
 
 def show_changed_host_key(parent: QWidget | None, message: str) -> None:
     QMessageBox.critical(parent, "Remote Host Key Changed", message)
+
+
+def ask_sudo_password(parent: QWidget | None, target: str, retry_message: str | None) -> str | None:
+    """Ask for the remote sudo password; ``None`` if the user cancels."""
+    label = (
+        f"Managing system services on <b>{target}</b> needs administrator access.<br><br>"
+        "Enter your sudo password for that machine. It is used once to start an "
+        "administrator session that lasts until you disconnect, and is <b>not</b> saved."
+    )
+    if retry_message:
+        label = f"<span style='color:#e03131'>{retry_message}</span><br><br>{label}"
+    password, ok = QInputDialog.getText(
+        parent, "Administrator Access", label, QLineEdit.EchoMode.Password
+    )
+    return password if ok and password else None
+
+
+def show_sudo_unavailable(parent: QWidget | None, message: str) -> None:
+    QMessageBox.warning(
+        parent,
+        "Administrator Access Unavailable",
+        f"{message}<br><br>The remote account must be allowed to use <code>sudo</code> "
+        "(for example, be in the <code>wheel</code> or <code>sudo</code> group).",
+    )
 
 
 # --- Flow ---
@@ -173,6 +200,60 @@ def handle_onboarding_error(
     return False
 
 
+def needs_elevation(exc: Any) -> bool:
+    """True if ``exc`` means a system-scope action needs administrator access."""
+    return _error_type(exc) == ELEVATION_REQUIRED
+
+
+def handle_elevation_error(
+    parent: QWidget | None,
+    client: ServiceDeckClient,
+    device_id: str,
+    exc: Any,
+    *,
+    target: str,
+    retry: Callable[[], None],
+    on_give_up: Callable[[str], None],
+    on_elevated: Callable[[], None] | None = None,
+) -> bool:
+    """Get administrator access for ``device_id`` interactively, then ``retry()``.
+
+    Passwordless sudo is tried first, so ``NOPASSWD`` setups never see a prompt. Returns
+    False (and does nothing) if ``exc`` is not an elevation request.
+    """
+    if not needs_elevation(exc):
+        return False
+
+    def elevate(password: str | None, attempt: int) -> None:
+        def succeeded(_elevated: Any) -> None:
+            if on_elevated is not None:
+                on_elevated()
+            retry()
+
+        def failed(msg: str, elevate_exc: Any) -> None:
+            kind = _error_type(elevate_exc)
+            if kind == SUDO_UNAVAILABLE:
+                show_sudo_unavailable(parent, elevate_exc.message)
+                on_give_up(elevate_exc.message)
+                return
+            if kind == SUDO_AUTH_FAILED and attempt < MAX_PASSWORD_ATTEMPTS:
+                retry_message = None if password is None else "The password was not accepted."
+                new_password = ask_sudo_password(parent, target, retry_message)
+                if new_password is None:
+                    on_give_up("Administrator access was cancelled.")
+                    return
+                elevate(new_password, attempt + 1)
+                return
+            on_give_up(msg)
+
+        run_async_task(
+            client.elevate_device, device_id, password, on_success=succeeded, on_error=failed
+        )
+
+    elevate(None, 0)
+    return True
+
+
 def connect_with_onboarding(
     parent: QWidget | None,
     client: ServiceDeckClient,
@@ -211,6 +292,8 @@ def connect_with_onboarding(
 
 __all__ = [
     "connect_with_onboarding",
+    "handle_elevation_error",
     "handle_onboarding_error",
+    "needs_elevation",
     "needs_onboarding",
 ]
