@@ -260,9 +260,7 @@ def create_app(
         )
 
     @app.exception_handler(RemoteTimeoutError)
-    async def remote_timeout_handler(
-        request: Request, exc: RemoteTimeoutError
-    ) -> JSONResponse:
+    async def remote_timeout_handler(request: Request, exc: RemoteTimeoutError) -> JSONResponse:
         return JSONResponse(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             content=ErrorDetail(
@@ -273,9 +271,7 @@ def create_app(
         )
 
     @app.exception_handler(RemoteProtocolError)
-    async def remote_protocol_handler(
-        request: Request, exc: RemoteProtocolError
-    ) -> JSONResponse:
+    async def remote_protocol_handler(request: Request, exc: RemoteProtocolError) -> JSONResponse:
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
             content=ErrorDetail(

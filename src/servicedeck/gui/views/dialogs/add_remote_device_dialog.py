@@ -156,7 +156,10 @@ class AddRemoteDeviceDialog(QDialog):
 
     def _on_host_text_changed(self, text: str) -> None:
         """Auto-populate display name from hostname if name edit is untouched."""
-        if not self._name_edit.text() or self._name_edit.text() == self._host_edit.placeholderText():
+        if (
+            not self._name_edit.text()
+            or self._name_edit.text() == self._host_edit.placeholderText()
+        ):
             clean = text.strip()
             if clean:
                 self._name_edit.setPlaceholderText(clean)

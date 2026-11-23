@@ -114,7 +114,10 @@ async def test_dispatch_daemon_reload(
 async def test_dispatch_unit_file(
     dispatcher: RequestDispatcher, mock_service_manager: MagicMock
 ) -> None:
-    mock_service_manager.get_unit_file.return_value = ("/lib/systemd/system/ssh.service", "[Unit]\n")
+    mock_service_manager.get_unit_file.return_value = (
+        "/lib/systemd/system/ssh.service",
+        "[Unit]\n",
+    )
     req = RequestMessage(id=31, method="service.unit_file", params={"name": "ssh"})
     resp = await dispatcher.dispatch(req)
     assert resp.success is True

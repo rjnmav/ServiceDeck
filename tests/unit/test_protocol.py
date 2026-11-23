@@ -131,7 +131,7 @@ class TestProtocolDecoder:
         assert messages[0].id == 99
 
     def test_decode_invalid_length_header(self) -> None:
-        self.decoder.feed(b"invalid_number\n{\"type\":\"goodbye\"}\n")
+        self.decoder.feed(b'invalid_number\n{"type":"goodbye"}\n')
         with pytest.raises(RemoteProtocolError, match="Invalid frame length header"):
             self.decoder.get_messages()
 
@@ -181,7 +181,7 @@ class TestAsyncStreamIO:
 
     async def test_read_message_incomplete(self) -> None:
         reader = asyncio.StreamReader()
-        reader.feed_data(b"50\n{\"partial\": true")
+        reader.feed_data(b'50\n{"partial": true')
         reader.feed_eof()
 
         with pytest.raises(RemoteProtocolError, match="Stream closed while reading"):

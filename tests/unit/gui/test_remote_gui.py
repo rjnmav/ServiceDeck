@@ -132,8 +132,13 @@ def test_manage_remote_devices_dialog_table_population(qapp):
     ]
 
     dlg = ManageRemoteDevicesDialog(client=mock_client)
-    # Give async load task a moment to complete
-    qapp.processEvents()
+    # The device list loads on a QThreadPool worker; its result reaches the dialog through a
+    # queued signal. Wait for the worker, then deliver the queued events.
+    for _ in range(50):
+        if dlg._table.rowCount():
+            break
+        QThreadPool.globalInstance().waitForDone(100)
+        qapp.processEvents()
 
     assert dlg._table.rowCount() == 2
     assert dlg._table.item(0, 0).text() == "Host 1"
@@ -197,7 +202,9 @@ def test_main_window_remote_host_handling(qapp):
     )
 
     mock_client = MagicMock(spec=ServiceDeckClient)
-    mock_client.get_scope.return_value = ScopeInfo(active_scope="user", available_scopes=["user", "system"])
+    mock_client.get_scope.return_value = ScopeInfo(
+        active_scope="user", available_scopes=["user", "system"]
+    )
     mock_client.list_devices.return_value = [
         RemoteDevice(
             id="remote-box",
@@ -220,13 +227,20 @@ def test_main_window_remote_host_handling(qapp):
         )
     ]
     mock_client.get_unit_file.return_value = ServiceUnitFile(
-        service="app.service", content="[Unit]", fragment_path="/etc/systemd/system/app.service", scope="user"
+        service="app.service",
+        content="[Unit]",
+        fragment_path="/etc/systemd/system/app.service",
+        scope="user",
     )
     mock_client.get_logs.return_value = ServiceLogs(
         service="app.service", logs="sample logs", scope="user", lines=200
     )
     mock_client.get_resources.return_value = ServiceResources(
-        service="app.service", cpu_usage_nsec=0, memory_current_bytes=1024, active_state="active", scope="user"
+        service="app.service",
+        cpu_usage_nsec=0,
+        memory_current_bytes=1024,
+        active_state="active",
+        scope="user",
     )
 
     win = MainWindow(client=mock_client)
@@ -255,7 +269,9 @@ def test_main_window_remote_host_handling(qapp):
 def test_main_window_scope_toggle_remote(qapp):
     """Verify MainWindow toggles scope cleanly on remote host without race conditions."""
     mock_client = MagicMock(spec=ServiceDeckClient)
-    mock_client.get_scope.return_value = ScopeInfo(active_scope="user", available_scopes=["user", "system"])
+    mock_client.get_scope.return_value = ScopeInfo(
+        active_scope="user", available_scopes=["user", "system"]
+    )
     mock_client.list_devices.return_value = []
     mock_client.list_services.return_value = [
         Service(
@@ -279,7 +295,6 @@ def test_main_window_scope_toggle_remote(qapp):
 
     assert win._current_scope == "system"
     mock_client.list_services.assert_called_with(scope="system", device_id="remote-node")
-
 
 
 def test_add_remote_device_dialog_agent_mode_defaults_to_bundled(qapp: Any) -> None:

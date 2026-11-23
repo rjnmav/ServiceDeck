@@ -39,11 +39,7 @@ class RemoteConnectionManager:
 
     def list_connected(self) -> list[str]:
         """Return a list of device IDs that currently have active connections."""
-        return [
-            dev_id
-            for dev_id, transport in self._transports.items()
-            if transport.is_connected
-        ]
+        return [dev_id for dev_id, transport in self._transports.items() if transport.is_connected]
 
     async def connect(
         self,

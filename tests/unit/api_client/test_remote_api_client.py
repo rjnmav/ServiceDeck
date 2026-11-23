@@ -108,7 +108,10 @@ def test_sync_remote_services_routing() -> None:
                     }
                 ],
             )
-        if request.method == "POST" and request.url.path == "/api/remote/srv1/services/nginx.service/restart":
+        if (
+            request.method == "POST"
+            and request.url.path == "/api/remote/srv1/services/nginx.service/restart"
+        ):
             return httpx.Response(
                 200,
                 json={

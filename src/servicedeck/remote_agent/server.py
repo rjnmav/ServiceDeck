@@ -75,7 +75,9 @@ class ProtocolServer:
                     break
 
                 if isinstance(message, GoodbyeMessage):
-                    logger.info("Received GoodbyeMessage (reason=%s). Shutting down.", message.reason)
+                    logger.info(
+                        "Received GoodbyeMessage (reason=%s). Shutting down.", message.reason
+                    )
                     break
 
                 if isinstance(message, RequestMessage):
