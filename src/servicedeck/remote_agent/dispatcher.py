@@ -199,9 +199,7 @@ class RequestDispatcher:
 
         if method == "service.resources":
             self._require_param("name", params)
-            resources = await self._manager.get_service_resources(
-                name=params["name"], scope=scope
-            )
+            resources = await self._manager.get_service_resources(name=params["name"], scope=scope)
             return dataclasses.asdict(resources)
 
         if method == "service.logs":

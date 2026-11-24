@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from servicedeck.backend.core.security_logger import log_remote_elevation
 from servicedeck.backend.exceptions import (
     AuthenticationRequiredError,
     AuthorizationDeniedError,
     InvalidServiceNameError,
     PermissionDeniedError,
     RemoteConnectionError,
+    RemoteElevationRequiredError,
     ServiceDeckError,
     ServiceNotFoundError,
     ServiceOperationError,
@@ -19,9 +21,17 @@ from servicedeck.backend.exceptions import (
 from servicedeck.backend.models.service import Service, ServiceResourceUsage
 from servicedeck.backend.remote.connection import RemoteConnectionManager
 from servicedeck.backend.remote.device_config import DeviceConfigManager, RemoteDevice
-from servicedeck.remote.models import HelloMessage, RequestMessage
+from servicedeck.backend.remote.key_setup import KeySetupResult, setup_key
+from servicedeck.backend.remote.keys import ServiceDeckKeyStore
+from servicedeck.backend.remote.known_hosts import HostKeyInfo
+from servicedeck.remote.models import HelloMessage, RequestMessage, ResponseMessage
 
 logger = logging.getLogger(__name__)
+
+#: Agent error codes that, for a system-scope call by the normal user, mean "needs root".
+_ELEVATION_CODES = frozenset(
+    {"AUTHENTICATION_REQUIRED", "AUTHORIZATION_DENIED", "PERMISSION_DENIED"}
+)
 
 
 class RemoteManager:
@@ -31,9 +41,11 @@ class RemoteManager:
         self,
         connection_manager: RemoteConnectionManager | None = None,
         config_manager: DeviceConfigManager | None = None,
+        key_store: ServiceDeckKeyStore | None = None,
     ) -> None:
         self._connections = connection_manager or RemoteConnectionManager()
         self._config = config_manager or DeviceConfigManager()
+        self._keys = key_store or ServiceDeckKeyStore()
         self._next_request_id = 1
 
     @property
@@ -72,6 +84,43 @@ class RemoteManager:
         await self._connections.disconnect(device_id)
         return self._config.remove_device(device_id)
 
+    def _require_device(self, device_id: str) -> RemoteDevice:
+        device = self._config.get_device(device_id)
+        if device is None:
+            raise RemoteConnectionError(
+                f"Device '{device_id}' is not configured.",
+                details={"device_id": device_id},
+            )
+        return device
+
+    # --- First-connection onboarding (host-key trust, SSH key setup) ---
+
+    async def check_host_key(self, device_id: str) -> HostKeyInfo:
+        """Fetch the device's SSH host key and report whether it is trusted."""
+        device = self._require_device(device_id)
+        return await self._connections.known_hosts.check(device.hostname, device.port)
+
+    async def trust_host_key(self, device_id: str, fingerprint: str) -> HostKeyInfo:
+        """Trust the device's host key, provided it still matches ``fingerprint``."""
+        device = self._require_device(device_id)
+        return await self._connections.known_hosts.trust(device.hostname, device.port, fingerprint)
+
+    async def setup_key(self, device_id: str, password: str) -> KeySetupResult:
+        """Install a login key on the device using its password once, then save the device.
+
+        The password is only forwarded to the one-time SSH login; it is never stored.
+        """
+        device = self._require_device(device_id)
+        await self._connections.disconnect(device_id)
+        result = await setup_key(
+            device,
+            password,
+            key_store=self._keys,
+            known_hosts=self._connections.known_hosts,
+        )
+        self._config.save_device(result.device)
+        return result
+
     # --- Connection Lifecycle ---
 
     async def connect(self, device_id: str, timeout: float = 15.0) -> HelloMessage:
@@ -96,6 +145,38 @@ class RemoteManager:
         """Return True if device_id currently has an active SSH session."""
         return self._connections.is_connected(device_id)
 
+    # --- Administrator access (root agent via sudo) ---
+
+    def is_elevated(self, device_id: str) -> bool:
+        """Return True if system-scope calls for device_id currently run as root."""
+        return self._connections.is_elevated(device_id)
+
+    async def elevate(self, device_id: str, password: str | None) -> HelloMessage:
+        """Get administrator access on device_id for the rest of this connection.
+
+        Connects first if needed. ``password`` answers sudo once and is not stored;
+        ``None`` tries passwordless sudo.
+        """
+        device = self._require_device(device_id)
+        if not self._connections.is_connected(device_id):
+            await self._connections.connect(device)
+        try:
+            hello = await self._connections.elevate(device_id, password)
+        except RemoteConnectionError as exc:
+            log_remote_elevation(
+                "denied", device_id, hostname=device.hostname, reason=type(exc).__name__
+            )
+            raise
+        log_remote_elevation("granted", device_id, hostname=device.hostname)
+        return hello
+
+    async def drop_privileges(self, device_id: str) -> None:
+        """Stop the root agent on device_id; system-scope changes need elevation again."""
+        was_elevated = self._connections.is_elevated(device_id)
+        await self._connections.drop_privileges(device_id)
+        if was_elevated:
+            log_remote_elevation("dropped", device_id)
+
     def list_connected(self) -> list[str]:
         """Return a list of currently connected device IDs."""
         return self._connections.list_connected()
@@ -109,7 +190,25 @@ class RemoteManager:
         params: dict[str, Any] | None = None,
         timeout: float = 30.0,
     ) -> Any:
-        """Execute a remote protocol method on device_id, raising domain exceptions on error."""
+        """Execute a remote protocol method on device_id, raising domain exceptions on error.
+
+        System-scope calls go to the root agent while the device is elevated. They are
+        never silently retried as the normal user once administrator access has ended.
+        """
+        scope = (params or {}).get("scope")
+        if scope == "system" and self._connections.is_elevated(device_id):
+            transport = self._connections.get_transport(device_id)
+            if transport is not None:
+                request = RequestMessage(id=self._get_next_id(), method=method, params=params or {})
+                try:
+                    response = await transport.send_privileged_request(request, timeout=timeout)
+                except RemoteConnectionError as exc:
+                    raise RemoteElevationRequiredError(
+                        "The administrator session ended; administrator access is needed again.",
+                        details=self._elevation_details(device_id, method, params),
+                    ) from exc
+                return self._unwrap(device_id, method, params, response, privileged=True)
+
         transport = self._connections.get_transport(device_id)
         if transport is None:
             # Auto-connect if configured
@@ -153,6 +252,33 @@ class RemoteManager:
             else:
                 raise
 
+        return self._unwrap(device_id, method, params, response)
+
+    @staticmethod
+    def _elevation_details(
+        device_id: str, method: str, params: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        return {
+            "device_id": device_id,
+            "action": method,
+            "service_name": (params or {}).get("name"),
+            "scope": (params or {}).get("scope"),
+        }
+
+    def _unwrap(
+        self,
+        device_id: str,
+        method: str,
+        params: dict[str, Any] | None,
+        response: ResponseMessage,
+        *,
+        privileged: bool = False,
+    ) -> Any:
+        """Return a response's result, or raise the domain exception it describes.
+
+        A permission-type failure of a system-scope call made as the normal user means
+        administrator access is needed, so it becomes ``RemoteElevationRequiredError``.
+        """
         if not response.success:
             err = response.error
             code = err.code if err else "UNKNOWN"
@@ -165,6 +291,18 @@ class RemoteManager:
             if code == "INVALID_SERVICE_NAME":
                 svc_name = str(params.get("name", "")) if params else ""
                 raise InvalidServiceNameError(svc_name, reason=msg)
+            if (
+                not privileged
+                and (params or {}).get("scope") == "system"
+                and code in _ELEVATION_CODES
+            ):
+                raise RemoteElevationRequiredError(
+                    f"{msg} Administrator access on the remote host is required.",
+                    details={
+                        **(details or {}),
+                        **self._elevation_details(device_id, method, params),
+                    },
+                )
             if code == "AUTHENTICATION_REQUIRED":
                 raise AuthenticationRequiredError(msg, details=details)
             if code == "AUTHORIZATION_DENIED":

@@ -100,8 +100,51 @@ class RemoteHostKeyChangedError(RemoteConnectionError):
     """Raised when the remote SSH host key does not match known_hosts."""
 
 
+class RemoteHostKeyUnknownError(RemoteConnectionError):
+    """Raised when connecting to a host whose SSH host key has never been trusted.
+
+    ``details`` carries ``fingerprint``, ``key_type``, ``hostname`` and ``port`` so the
+    client can show the fingerprint for Trust-On-First-Use confirmation.
+    """
+
+
+class RemoteKeySetupError(RemoteConnectionError):
+    """Raised when installing or verifying the SSH login key on a remote host fails."""
+
+
 class SSHAuthenticationError(RemoteConnectionError):
     """Raised when SSH authentication (public-key or agent) fails."""
+
+
+class RemoteAgentBootstrapError(RemoteConnectionError):
+    """Raised when the remote agent could not be started on the remote host.
+
+    Typical causes: ``python3`` missing or too old on the remote host, or the
+    installed ``servicedeck-remote`` exiting before completing the handshake.
+    """
+
+
+class RemoteSudoAuthError(RemoteConnectionError):
+    """Raised when sudo on the remote host rejects (or needs) the administrator password.
+
+    ``details["password_required"]`` is True when no password was supplied and sudo asked
+    for one, so the client knows to prompt rather than report a wrong password.
+    """
+
+
+class RemoteSudoUnavailableError(RemoteConnectionError):
+    """Raised when administrator access via sudo is impossible on the remote host.
+
+    Typical causes: sudo is not installed, the user is not in sudoers, or sudoers sets
+    ``requiretty``.
+    """
+
+
+class RemoteElevationRequiredError(AuthenticationRequiredError):
+    """Raised when a system-scope operation on a remote device needs administrator access.
+
+    The client should obtain it with the device's ``elevate`` endpoint and retry.
+    """
 
 
 class RemoteDeviceNotTrustedError(ServiceDeckError):

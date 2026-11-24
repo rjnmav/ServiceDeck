@@ -22,7 +22,12 @@ from servicedeck.backend.exceptions import (
     RemoteConnectionError,
     RemoteDeviceNotTrustedError,
     RemoteDeviceRevokedError,
+    RemoteElevationRequiredError,
     RemoteHostKeyChangedError,
+    RemoteHostKeyUnknownError,
+    RemoteKeySetupError,
+    RemoteSudoAuthError,
+    RemoteSudoUnavailableError,
     ServiceDeckError,
     ServiceNotFoundError,
     ServiceOperationError,
@@ -180,6 +185,67 @@ def create_app(
             ).model_dump(),
         )
 
+    @app.exception_handler(RemoteHostKeyUnknownError)
+    async def remote_host_key_unknown_handler(
+        request: Request, exc: RemoteHostKeyUnknownError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=ErrorDetail(
+                error="RemoteHostKeyUnknownError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteElevationRequiredError)
+    async def remote_elevation_required_handler(
+        request: Request, exc: RemoteElevationRequiredError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content=ErrorDetail(
+                error="RemoteElevationRequiredError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteSudoAuthError)
+    async def remote_sudo_auth_handler(request: Request, exc: RemoteSudoAuthError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content=ErrorDetail(
+                error="RemoteSudoAuthError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteSudoUnavailableError)
+    async def remote_sudo_unavailable_handler(
+        request: Request, exc: RemoteSudoUnavailableError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content=ErrorDetail(
+                error="RemoteSudoUnavailableError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(RemoteKeySetupError)
+    async def remote_key_setup_handler(request: Request, exc: RemoteKeySetupError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content=ErrorDetail(
+                error="RemoteKeySetupError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
     @app.exception_handler(RemoteHostKeyChangedError)
     async def remote_host_key_handler(
         request: Request, exc: RemoteHostKeyChangedError
@@ -194,9 +260,7 @@ def create_app(
         )
 
     @app.exception_handler(RemoteTimeoutError)
-    async def remote_timeout_handler(
-        request: Request, exc: RemoteTimeoutError
-    ) -> JSONResponse:
+    async def remote_timeout_handler(request: Request, exc: RemoteTimeoutError) -> JSONResponse:
         return JSONResponse(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             content=ErrorDetail(
@@ -207,9 +271,7 @@ def create_app(
         )
 
     @app.exception_handler(RemoteProtocolError)
-    async def remote_protocol_handler(
-        request: Request, exc: RemoteProtocolError
-    ) -> JSONResponse:
+    async def remote_protocol_handler(request: Request, exc: RemoteProtocolError) -> JSONResponse:
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
             content=ErrorDetail(

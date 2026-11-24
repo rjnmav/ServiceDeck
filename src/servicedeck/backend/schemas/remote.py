@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+AgentMode = Literal["bundled", "installed", "auto"]
 
 
 class RemoteDeviceCreateRequest(BaseModel):
@@ -16,6 +20,11 @@ class RemoteDeviceCreateRequest(BaseModel):
     port: int = Field(default=22, ge=1, le=65535, description="SSH port")
     username: str | None = Field(default=None, description="SSH login username")
     ssh_key_path: str | None = Field(default=None, description="Path to private SSH key file")
+    agent_mode: AgentMode = Field(
+        default="bundled",
+        description="How the remote agent is started: 'bundled' streams it over SSH (no remote "
+        "install), 'installed' runs servicedeck-remote, 'auto' prefers an installed agent.",
+    )
 
 
 class RemoteDeviceResponse(BaseModel):
@@ -29,6 +38,7 @@ class RemoteDeviceResponse(BaseModel):
     port: int
     username: str | None
     ssh_key_path: str | None
+    agent_mode: AgentMode = "bundled"
     connected: bool
 
 
@@ -43,6 +53,9 @@ class RemoteConnectionResponse(BaseModel):
     remote_user: str | None = None
     remote_uid: int | None = None
     remote_version: str | None = None
+    elevated: bool = Field(
+        False, description="True while system-scope calls run as root through sudo"
+    )
 
 
 class RemoteDeviceDisconnectResponse(BaseModel):
@@ -54,9 +67,79 @@ class RemoteDeviceDisconnectResponse(BaseModel):
     connected: bool = False
 
 
+class HostKeyResponse(BaseModel):
+    """The SSH host key a remote server presents and whether it is trusted."""
+
+    model_config = ConfigDict(frozen=True)
+
+    hostname: str
+    port: int
+    status: Literal["trusted", "unknown", "changed"]
+    key_type: str
+    fingerprint: str = Field(..., description="SHA256 fingerprint, as shown by ssh-keygen -l")
+
+
+class TrustHostKeyRequest(BaseModel):
+    """Confirmation of the fingerprint the user verified."""
+
+    model_config = ConfigDict(frozen=True)
+
+    fingerprint: str = Field(..., min_length=1, description="Fingerprint the user confirmed")
+
+
+class SetupKeyRequest(BaseModel):
+    """One-time remote account password used to install the SSH login key."""
+
+    model_config = ConfigDict(frozen=True)
+
+    password: SecretStr = Field(
+        ...,
+        description="Remote account password. Used for a single SSH login to install the key; "
+        "never stored or logged.",
+    )
+
+
+class ElevateRequest(BaseModel):
+    """sudo password for administrator access on the remote host."""
+
+    model_config = ConfigDict(frozen=True)
+
+    password: SecretStr | None = Field(
+        None,
+        description="Remote sudo password, used once to start the root agent and never "
+        "stored or logged. Omit to try passwordless sudo.",
+    )
+
+
+class ElevationResponse(BaseModel):
+    """Administrator access state of a remote device."""
+
+    model_config = ConfigDict(frozen=True)
+
+    device_id: str
+    elevated: bool
+
+
+class SetupKeyResponse(BaseModel):
+    """Result of installing the SSH login key on a remote device."""
+
+    model_config = ConfigDict(frozen=True)
+
+    device: RemoteDeviceResponse
+    key_path: str
+    key_fingerprint: str
+    added: bool = Field(..., description="False if the key was already authorized")
+
+
 __all__ = [
+    "ElevateRequest",
+    "ElevationResponse",
+    "HostKeyResponse",
     "RemoteConnectionResponse",
     "RemoteDeviceCreateRequest",
     "RemoteDeviceDisconnectResponse",
     "RemoteDeviceResponse",
+    "SetupKeyRequest",
+    "SetupKeyResponse",
+    "TrustHostKeyRequest",
 ]

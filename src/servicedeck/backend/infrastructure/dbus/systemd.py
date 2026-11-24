@@ -9,7 +9,6 @@ from typing import Any, Protocol
 from dbus_fast.constants import MessageFlag, MessageType
 from dbus_fast.message import Message
 
-from servicedeck.backend.config.settings import Settings, get_settings
 from servicedeck.backend.exceptions import (
     AuthorizationDeniedError,
     PermissionDeniedError,
@@ -18,6 +17,7 @@ from servicedeck.backend.exceptions import (
     ServiceOperationError,
     SystemdConnectionError,
 )
+from servicedeck.backend.infrastructure.dbus.config import DbusSettingsLike
 from servicedeck.backend.infrastructure.dbus.connection import DbusConnectionManager
 from servicedeck.backend.models.service import (
     Service,
@@ -113,9 +113,14 @@ class DbusSystemdAdapter:
     def __init__(
         self,
         connection_manager: DbusConnectionManager | None = None,
-        settings: Settings | None = None,
+        settings: DbusSettingsLike | None = None,
     ) -> None:
-        self._settings = settings or get_settings()
+        if settings is None:
+            # Imported lazily: see DbusConnectionManager.__init__.
+            from servicedeck.backend.config.settings import get_settings
+
+            settings = get_settings()
+        self._settings: DbusSettingsLike = settings
         self._connection_manager = connection_manager or DbusConnectionManager(self._settings)
 
     def _get_variant_value(self, variant: object) -> str:

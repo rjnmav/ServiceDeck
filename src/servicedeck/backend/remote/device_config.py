@@ -13,6 +13,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "servicedeck" / "remote-devices.json"
 
+#: How the remote agent is started on the remote host.
+#: - ``bundled``: ship the agent over SSH and run it from memory (no remote install).
+#: - ``installed``: run an installed ``servicedeck-remote`` executable.
+#: - ``auto``: use ``servicedeck-remote`` if it is on the remote PATH, else ``bundled``.
+AGENT_MODES: tuple[str, ...] = ("bundled", "installed", "auto")
+DEFAULT_AGENT_MODE = "bundled"
+
 
 @dataclass(frozen=True, slots=True)
 class RemoteDevice:
@@ -28,6 +35,13 @@ class RemoteDevice:
     port: int = 22
     username: str | None = None
     ssh_key_path: str | None = None
+    agent_mode: str = DEFAULT_AGENT_MODE
+
+    def __post_init__(self) -> None:
+        if self.agent_mode not in AGENT_MODES:
+            raise ValueError(
+                f"Invalid agent_mode {self.agent_mode!r}; expected one of {', '.join(AGENT_MODES)}"
+            )
 
     def to_dict(self) -> dict[str, object]:
         """Convert dataclass to dictionary."""
@@ -43,7 +57,25 @@ class RemoteDevice:
             port=int(data.get("port", 22)),
             username=str(data["username"]) if data.get("username") else None,
             ssh_key_path=str(data["ssh_key_path"]) if data.get("ssh_key_path") else None,
+            agent_mode=_parse_agent_mode(data.get("agent_mode"), str(data["id"])),
         )
+
+
+def _parse_agent_mode(value: object, device_id: str) -> str:
+    """Read agent_mode from stored config, tolerating missing or unknown values.
+
+    Unknown values fall back to the default (with a warning) instead of raising, so a
+    single bad entry can never make ``load_devices`` drop every configured device.
+    """
+    if value is None or value == "":
+        return DEFAULT_AGENT_MODE
+    mode = str(value)
+    if mode not in AGENT_MODES:
+        logger.warning(
+            "Device '%s' has unknown agent_mode %r; using '%s'", device_id, mode, DEFAULT_AGENT_MODE
+        )
+        return DEFAULT_AGENT_MODE
+    return mode
 
 
 class DeviceConfigManager:
@@ -117,4 +149,10 @@ class DeviceConfigManager:
             raise
 
 
-__all__ = ["DEFAULT_CONFIG_PATH", "DeviceConfigManager", "RemoteDevice"]
+__all__ = [
+    "AGENT_MODES",
+    "DEFAULT_AGENT_MODE",
+    "DEFAULT_CONFIG_PATH",
+    "DeviceConfigManager",
+    "RemoteDevice",
+]

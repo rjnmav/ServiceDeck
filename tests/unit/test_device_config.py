@@ -81,3 +81,36 @@ def test_device_config_manager_remove_device(tmp_path: Path) -> None:
     assert len(mgr.load_devices()) == 1
     assert mgr.get_device("srv1") is None
     assert mgr.get_device("srv2") == dev2
+
+
+def test_agent_mode_defaults_to_bundled_for_legacy_config(tmp_path: Path) -> None:
+    config_file = tmp_path / "devices.json"
+    config_file.write_text('{"devices": [{"id": "old", "hostname": "old.test"}]}')
+    devices = DeviceConfigManager(config_path=config_file).load_devices()
+    assert [d.agent_mode for d in devices] == ["bundled"]
+
+
+def test_unknown_agent_mode_in_config_does_not_drop_devices(tmp_path: Path) -> None:
+    config_file = tmp_path / "devices.json"
+    config_file.write_text(
+        '{"devices": ['
+        '{"id": "a", "hostname": "a.test", "agent_mode": "bogus"},'
+        '{"id": "b", "hostname": "b.test", "agent_mode": "auto"}'
+        "]}"
+    )
+    devices = DeviceConfigManager(config_path=config_file).load_devices()
+    assert [(d.id, d.agent_mode) for d in devices] == [("a", "bundled"), ("b", "auto")]
+
+
+def test_agent_mode_round_trip_and_validation(tmp_path: Path) -> None:
+    import pytest
+
+    mgr = DeviceConfigManager(config_path=tmp_path / "devices.json")
+    mgr.save_device(
+        RemoteDevice(id="x", display_name="X", hostname="x.test", agent_mode="installed")
+    )
+    loaded = mgr.get_device("x")
+    assert loaded is not None and loaded.agent_mode == "installed"
+
+    with pytest.raises(ValueError, match="Invalid agent_mode"):
+        RemoteDevice(id="y", display_name="Y", hostname="y.test", agent_mode="bogus")

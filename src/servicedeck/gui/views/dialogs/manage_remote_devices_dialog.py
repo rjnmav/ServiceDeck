@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from servicedeck.api_client import ServiceDeckClient
 from servicedeck.api_client.models.remote import RemoteDevice
 from servicedeck.gui.views.dialogs.add_remote_device_dialog import AddRemoteDeviceDialog
+from servicedeck.gui.views.dialogs.remote_onboarding import connect_with_onboarding
 from servicedeck.gui.workers.service_worker import run_async_task
 
 
@@ -32,6 +33,7 @@ class ManageRemoteDevicesDialog(QDialog):
         self.setObjectName("manageRemoteDevicesDialog")
         self._client = client
         self.selected_device_id: str | None = None
+        self._devices: list[RemoteDevice] = []
 
         self._setup_ui()
         self.refresh_devices()
@@ -110,6 +112,7 @@ class ManageRemoteDevicesDialog(QDialog):
             return self._client.list_devices()
 
         def on_success(devices: list[RemoteDevice]) -> None:
+            self._devices = devices
             self._table.setRowCount(len(devices))
             for row, dev in enumerate(devices):
                 name_item = QTableWidgetItem(dev.display_name)
@@ -156,16 +159,28 @@ class ManageRemoteDevicesDialog(QDialog):
         if not dev_id or not self._client:
             return
 
-        def task() -> None:
-            self._client.connect_device(dev_id)
-
         def on_success(res: Any) -> None:
             self.refresh_devices()
 
         def on_error(msg: str, exc: Any) -> None:
+            self.refresh_devices()
             QMessageBox.critical(self, "Connection Error", f"Failed to connect: {msg}")
 
-        run_async_task(task, on_success=on_success, on_error=on_error)
+        connect_with_onboarding(
+            self,
+            self._client,
+            dev_id,
+            target=self._device_target(dev_id),
+            on_success=on_success,
+            on_error=on_error,
+        )
+
+    def _device_target(self, dev_id: str) -> str:
+        """``user@host`` label for prompts, from the loaded device list."""
+        for dev in self._devices:
+            if dev.id == dev_id:
+                return f"{dev.username}@{dev.hostname}" if dev.username else dev.hostname
+        return dev_id
 
     def _on_disconnect_clicked(self) -> None:
         dev_id = self._selected_device_id()

@@ -3,7 +3,12 @@
 from typing import Any
 
 from servicedeck.api_client.models.common import HealthInfo, ScopeInfo
-from servicedeck.api_client.models.remote import RemoteConnectionInfo, RemoteDevice
+from servicedeck.api_client.models.remote import (
+    HostKeyInfo,
+    KeySetupInfo,
+    RemoteConnectionInfo,
+    RemoteDevice,
+)
 from servicedeck.api_client.models.service import (
     CreatedService,
     DaemonReloadResult,
@@ -13,7 +18,7 @@ from servicedeck.api_client.models.service import (
     ServiceResources,
     ServiceUnitFile,
 )
-from servicedeck.api_client.transport import DEFAULT_TIMEOUT, SyncTransport
+from servicedeck.api_client.transport import DEFAULT_TIMEOUT, ONBOARDING_TIMEOUT, SyncTransport
 
 
 class ServiceDeckClient:
@@ -73,6 +78,7 @@ class ServiceDeckClient:
         username: str | None = None,
         display_name: str | None = None,
         ssh_key_path: str | None = None,
+        agent_mode: str | None = None,
     ) -> RemoteDevice:
         """Register a new remote device configuration."""
         payload: dict[str, Any] = {
@@ -85,6 +91,8 @@ class ServiceDeckClient:
             payload["username"] = username
         if ssh_key_path:
             payload["ssh_key_path"] = ssh_key_path
+        if agent_mode:
+            payload["agent_mode"] = agent_mode
         data = self.transport.request("POST", "/api/remote/devices", json=payload)
         return RemoteDevice.from_dict(data)
 
@@ -96,6 +104,56 @@ class ServiceDeckClient:
         """Establish an SSH transport connection and verify the remote agent."""
         data = self.transport.request("POST", f"/api/remote/devices/{device_id}/connect")
         return RemoteConnectionInfo.from_dict(data)
+
+    def get_host_key(self, device_id: str) -> HostKeyInfo:
+        """Fetch the device's SSH host key fingerprint and trust status."""
+        data = self.transport.request(
+            "GET", f"/api/remote/devices/{device_id}/host-key", timeout=ONBOARDING_TIMEOUT
+        )
+        return HostKeyInfo.from_dict(data)
+
+    def trust_host_key(self, device_id: str, fingerprint: str) -> HostKeyInfo:
+        """Trust the device's SSH host key after the user verified ``fingerprint``."""
+        data = self.transport.request(
+            "POST",
+            f"/api/remote/devices/{device_id}/host-key/trust",
+            json={"fingerprint": fingerprint},
+            timeout=ONBOARDING_TIMEOUT,
+        )
+        return HostKeyInfo.from_dict(data)
+
+    def setup_key(self, device_id: str, password: str) -> KeySetupInfo:
+        """Install the SSH login key on the device using its password once.
+
+        The password is sent only to the local backend, which uses it for a single SSH
+        login and never stores it.
+        """
+        data = self.transport.request(
+            "POST",
+            f"/api/remote/devices/{device_id}/setup-key",
+            json={"password": password},
+            timeout=ONBOARDING_TIMEOUT,
+        )
+        return KeySetupInfo.from_dict(data)
+
+    def elevate_device(self, device_id: str, password: str | None = None) -> bool:
+        """Get administrator (root via sudo) access on the device for this connection.
+
+        ``password`` is the remote sudo password; it goes only to the local backend, which
+        uses it once and never stores it. ``None`` tries passwordless sudo.
+        """
+        body = {"password": password} if password is not None else {}
+        data = self.transport.request(
+            "POST",
+            f"/api/remote/devices/{device_id}/elevate",
+            json=body,
+            timeout=ONBOARDING_TIMEOUT,
+        )
+        return bool(data.get("elevated", False))
+
+    def drop_device_privileges(self, device_id: str) -> None:
+        """Stop the device's root agent; system-service changes need elevation again."""
+        self.transport.request("POST", f"/api/remote/devices/{device_id}/drop-privileges")
 
     def disconnect_device(self, device_id: str) -> None:
         """Terminate the SSH transport session to the specified device."""

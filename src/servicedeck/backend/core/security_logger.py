@@ -94,3 +94,24 @@ def log_scope_change(
         new_scope,
         caller or "local",
     )
+
+
+def log_remote_elevation(
+    outcome: str,
+    device_id: str,
+    hostname: str | None = None,
+    reason: str | None = None,
+) -> None:
+    """Log administrator (root agent) access on a remote device: granted, denied, dropped.
+
+    Never receives or logs the sudo password.
+    """
+    log = logger.warning if outcome == "denied" else logger.info
+    log(
+        "EVENT=remote_elevation timestamp=%s outcome=%s device=%s host=%s reason=%s",
+        _timestamp(),
+        outcome,
+        device_id,
+        hostname or "-",
+        reason or "-",
+    )
