@@ -37,7 +37,7 @@ from servicedeck.backend.exceptions import (
     RemoteSudoUnavailableError,
 )
 from servicedeck.backend.remote.bundle import get_agent_payload, stage1_command
-from servicedeck.backend.remote.channel import drain_stderr, exchange_request
+from servicedeck.backend.remote.channel import AgentChannel, RemoteStream, drain_stderr
 from servicedeck.remote.models import GoodbyeMessage, HelloMessage, RequestMessage, ResponseMessage
 from servicedeck.remote.protocol import read_message, write_message
 
@@ -84,12 +84,14 @@ class PrivilegedAgent:
         self._remote_command = remote_command
         self._process: asyncssh.SSHClientProcess | None = None
         self._hello: HelloMessage | None = None
-        self._lock = asyncio.Lock()
+        self._channel: AgentChannel | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=20)
 
     @property
     def is_alive(self) -> bool:
+        if self._channel is not None and self._channel.closed:
+            return False
         return self._process is not None and not self._process.is_closing()
 
     @property
@@ -152,6 +154,7 @@ class PrivilegedAgent:
             )
 
         self._hello = hello
+        self._channel = AgentChannel(self._process, self._hostname, self._label)
         logger.info("Administrator agent running on %s (uid 0)", self._hostname)
         return hello
 
@@ -218,18 +221,31 @@ class PrivilegedAgent:
         last = text.splitlines()[-1] if text else "no output"
         return RemoteSudoUnavailableError(f"Administrator access failed on {host}: {last}", details)
 
+    def _require_channel(self, request_id: int) -> AgentChannel:
+        if not self.is_alive or self._channel is None:
+            raise RemoteConnectionError(
+                f"The administrator session on {self._hostname} has ended.",
+                details={"request_id": request_id},
+            )
+        return self._channel
+
     async def send_request(self, request: RequestMessage, timeout: float = 30.0) -> ResponseMessage:
-        async with self._lock:
-            if not self.is_alive or self._process is None:
-                raise RemoteConnectionError(
-                    f"The administrator session on {self._hostname} has ended.",
-                    details={"request_id": request.id},
-                )
-            try:
-                return await exchange_request(self._process, request, timeout, self._hostname)
-            except Exception:
-                await self.close()
-                raise
+        channel = self._require_channel(request.id)
+        try:
+            return await channel.request(request, timeout)
+        except Exception:
+            await self.close()
+            raise
+
+    async def open_stream(
+        self, request: RequestMessage, timeout: float = 30.0
+    ) -> tuple[ResponseMessage, RemoteStream | None]:
+        channel = self._require_channel(request.id)
+        try:
+            return await channel.open_stream(request, timeout)
+        except Exception:
+            await self.close()
+            raise
 
     async def close(self) -> None:
         """End the root agent. Safe to call repeatedly."""
@@ -249,6 +265,9 @@ class PrivilegedAgent:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._stderr_task
         self._stderr_task = None
+        channel, self._channel = self._channel, None
+        if channel is not None:
+            await channel.close()
 
 
 __all__ = ["SUDO_PROMPT", "SUDO_READY", "PrivilegedAgent", "sudo_command"]

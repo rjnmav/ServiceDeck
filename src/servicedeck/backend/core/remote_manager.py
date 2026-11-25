@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 from servicedeck.backend.core.security_logger import log_remote_elevation
@@ -18,13 +19,14 @@ from servicedeck.backend.exceptions import (
     ServiceOperationError,
     SystemdConnectionError,
 )
-from servicedeck.backend.models.service import Service, ServiceResourceUsage
+from servicedeck.backend.models.service import Service, ServiceEvent, ServiceResourceUsage
+from servicedeck.backend.remote.channel import RemoteStream
 from servicedeck.backend.remote.connection import RemoteConnectionManager
 from servicedeck.backend.remote.device_config import DeviceConfigManager, RemoteDevice
 from servicedeck.backend.remote.key_setup import KeySetupResult, setup_key
 from servicedeck.backend.remote.keys import ServiceDeckKeyStore
 from servicedeck.backend.remote.known_hosts import HostKeyInfo
-from servicedeck.remote.models import HelloMessage, RequestMessage, ResponseMessage
+from servicedeck.remote.models import ErrorDetail, HelloMessage, RequestMessage, ResponseMessage
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +255,107 @@ class RemoteManager:
                 raise
 
         return self._unwrap(device_id, method, params, response)
+
+    async def _ensure_transport(self, device_id: str) -> Any:
+        transport = self._connections.get_transport(device_id)
+        if transport is None:
+            await self._connections.connect(self._require_device(device_id))
+            transport = self._connections.get_transport(device_id)
+            if transport is None:
+                raise RemoteConnectionError(
+                    f"Failed to establish connection to '{device_id}'.",
+                    details={"device_id": device_id},
+                )
+        return transport
+
+    async def _open_stream(
+        self, device_id: str, method: str, params: dict[str, Any], *, privileged: bool = False
+    ) -> RemoteStream:
+        """Open an agent stream, raising the domain error if the agent refuses it.
+
+        ``privileged`` streams run on the root agent when the device is elevated.
+        """
+        transport = await self._ensure_transport(device_id)
+        request = RequestMessage(id=self._get_next_id(), method=method, params=params)
+        use_root = privileged and self._connections.is_elevated(device_id)
+        if use_root:
+            response, stream = await transport.open_privileged_stream(request)
+        else:
+            response, stream = await transport.open_stream(request)
+        if stream is None:
+            self._unwrap(device_id, method, params, response, privileged=use_root)
+            raise ServiceDeckError(f"The agent on '{device_id}' did not open the stream.")
+        return stream
+
+    def _raise_stream_error(
+        self, device_id: str, method: str, params: dict[str, Any], data: Any
+    ) -> None:
+        """Raise the domain error carried by a stream's ``end`` event, if any."""
+        error = data.get("error") if isinstance(data, dict) else None
+        if not isinstance(error, dict):
+            return
+        response = ResponseMessage(
+            id=0,
+            success=False,
+            error=ErrorDetail(
+                code=str(error.get("code", "")),
+                message=str(error.get("message", "")),
+                details=error.get("details") or {},
+            ),
+        )
+        self._unwrap(device_id, method, params, response, privileged=True)
+
+    async def watch_services(
+        self, device_id: str, scope: str | None = None
+    ) -> AsyncIterator[ServiceEvent]:
+        """Stream live service changes from the remote host (first event: ``ready``)."""
+        params: dict[str, Any] = {"scope": scope} if scope else {}
+        resolved_scope = scope or "user"
+        stream = await self._open_stream(device_id, "stream.services", params)
+        try:
+            yield ServiceEvent(kind="ready", scope=resolved_scope)
+            async for event, data in stream:
+                if event == "end":
+                    self._raise_stream_error(device_id, "stream.services", params, data)
+                    return
+                payload = data if isinstance(data, dict) else {}
+                event_scope = str(payload.get("scope") or resolved_scope)
+                if event == "service":
+                    service = Service(**payload)
+                    yield ServiceEvent(
+                        kind="changed", scope=service.scope, name=service.name, service=service
+                    )
+                elif event == "removed":
+                    yield ServiceEvent(kind="removed", scope=event_scope, name=payload.get("name"))
+                elif event == "resync":
+                    yield ServiceEvent(kind="resync", scope=event_scope)
+        finally:
+            await stream.aclose()
+
+    async def follow_service_logs(
+        self, device_id: str, name: str, lines: int = 200, scope: str | None = None
+    ) -> AsyncIterator[str]:
+        """Stream journal lines from the remote host; the first item is ``""`` (ready).
+
+        System-scope logs are read by the root agent while the device is elevated, which
+        can see the whole journal.
+        """
+        params: dict[str, Any] = {"name": name, "lines": lines}
+        if scope:
+            params["scope"] = scope
+        stream = await self._open_stream(
+            device_id, "stream.logs", params, privileged=scope == "system"
+        )
+        try:
+            yield ""
+            async for event, data in stream:
+                if event == "end":
+                    self._raise_stream_error(device_id, "stream.logs", params, data)
+                    return
+                if event == "log" and isinstance(data, dict):
+                    yield str(data.get("line", ""))
+        finally:
+            await stream.aclose()
 
     @staticmethod
     def _elevation_details(

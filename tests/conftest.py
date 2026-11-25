@@ -16,6 +16,7 @@ from servicedeck.backend.exceptions import (
 )
 from servicedeck.backend.models.service import (
     Service,
+    ServiceEvent,
     ServiceResourceUsage,
     normalize_service_name,
     validate_scope,
@@ -33,6 +34,11 @@ class FakeSystemdAdapter:
         self.unit_files: dict[tuple[str, str], tuple[str | None, str]] = {}
         self.service_logs: dict[tuple[str, str], str] = {}
         self.service_resources: dict[tuple[str, str], ServiceResourceUsage] = {}
+        # Live streams: scripted items, sent after the "ready" item, then the stream ends.
+        self.watch_events: list[ServiceEvent] = []
+        self.followed_logs: dict[tuple[str, str], list[str]] = {}
+        self.stream_error: Exception | None = None
+        self.closed_streams: list[str] = []
 
         initial = services or [
             # User scope services
@@ -356,6 +362,35 @@ class FakeSystemdAdapter:
             raise ServiceNotFoundError(clean)
 
         return f"Mar 22 10:00:00 test-host {clean}[1234]: Started {clean}.\nMar 22 10:00:01 test-host {clean}[1234]: Service is running smoothly.\n"
+
+    async def watch_services(self, scope: str = "user") -> AsyncIterator[ServiceEvent]:
+        valid_scope = validate_scope(scope)
+        self.calls.append(("watch_services", "*", valid_scope))
+        try:
+            yield ServiceEvent(kind="ready", scope=valid_scope)
+            for event in self.watch_events:
+                yield event
+            if self.stream_error is not None:
+                raise self.stream_error
+        finally:
+            self.closed_streams.append("watch")
+
+    async def follow_service_logs(
+        self, name: str, lines: int = 200, scope: str = "user"
+    ) -> AsyncIterator[str]:
+        valid_scope = validate_scope(scope)
+        clean = normalize_service_name(name)
+        self.calls.append(("follow_service_logs", clean, valid_scope))
+        if (valid_scope, clean) not in self._services:
+            raise ServiceNotFoundError(clean)
+        try:
+            yield ""
+            for line in self.followed_logs.get((valid_scope, clean), []):
+                yield line
+            if self.stream_error is not None:
+                raise self.stream_error
+        finally:
+            self.closed_streams.append("logs")
 
     async def create_service(
         self, name: str, content: str, scope: str = "user", overwrite: bool = False

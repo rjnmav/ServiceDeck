@@ -20,6 +20,7 @@ from servicedeck.api_client.exceptions import (
     ServiceDeckAPIError,
     ServiceDeckConnectionError,
     ServiceDeckHTTPError,
+    ServiceDeckStreamError,
     ServiceNotFoundError,
     ServiceOperationError,
     ServicePermissionDeniedError,
@@ -36,17 +37,20 @@ from servicedeck.api_client.models.service import (
     CreatedService,
     DaemonReloadResult,
     Service,
+    ServiceEvent,
     ServiceLogs,
     ServiceOperationResult,
     ServiceResources,
     ServiceUnitFile,
 )
+from servicedeck.api_client.streaming import EventStream
 
 __all__ = [
     "AsyncServiceDeckClient",
     "BackendUnavailableError",
     "CreatedService",
     "DaemonReloadResult",
+    "EventStream",
     "HealthInfo",
     "HostKeyInfo",
     "InvalidServiceNameError",
@@ -68,6 +72,8 @@ __all__ = [
     "ServiceDeckClient",
     "ServiceDeckConnectionError",
     "ServiceDeckHTTPError",
+    "ServiceDeckStreamError",
+    "ServiceEvent",
     "ServiceLogs",
     "ServiceNotFoundError",
     "ServiceOperationError",

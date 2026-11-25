@@ -1,8 +1,11 @@
 """systemd adapter communicating via D-Bus for both User and System scopes."""
 
 import asyncio
+import contextlib
 import logging
 import os
+import re
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -21,12 +24,26 @@ from servicedeck.backend.infrastructure.dbus.config import DbusSettingsLike
 from servicedeck.backend.infrastructure.dbus.connection import DbusConnectionManager
 from servicedeck.backend.models.service import (
     Service,
+    ServiceEvent,
     ServiceResourceUsage,
     normalize_service_name,
     validate_scope,
 )
 
 logger = logging.getLogger(__name__)
+
+UNIT_PATH_PREFIX = "/org/freedesktop/systemd1/unit/"
+_UNIT_PATH_ESCAPE = re.compile(r"_([0-9a-fA-F]{2})")
+
+
+def unit_name_from_path(path: str) -> str | None:
+    """Decode a systemd unit object path (``.../unit/nginx_2eservice``) to its unit name."""
+    if not path.startswith(UNIT_PATH_PREFIX):
+        return None
+    encoded = path[len(UNIT_PATH_PREFIX) :]
+    if not encoded or "/" in encoded:
+        return None
+    return _UNIT_PATH_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), encoded)
 
 
 class SystemdAdapter(Protocol):
@@ -98,6 +115,19 @@ class SystemdAdapter(Protocol):
         """Check if systemd D-Bus interface is accessible for the specified scope."""
         ...
 
+    def watch_services(self, scope: str = "user") -> AsyncIterator[ServiceEvent]:
+        """Yield live service changes; the first event is always ``ready``."""
+        ...
+
+    def follow_service_logs(
+        self, name: str, lines: int = 200, scope: str = "user"
+    ) -> AsyncIterator[str]:
+        """Yield the last ``lines`` journal lines, then new ones as they are written.
+
+        The first item is always ``""`` (a readiness marker, not a log line).
+        """
+        ...
+
 
 class DbusSystemdAdapter:
     """Production implementation of SystemdAdapter using dbus-fast for User and System buses."""
@@ -109,6 +139,20 @@ class DbusSystemdAdapter:
     UNIT_INTERFACE = "org.freedesktop.systemd1.Unit"
     SERVICE_INTERFACE = "org.freedesktop.systemd1.Service"
     UNAVAILABLE_COUNTER = 18446744073709551615
+    DBUS_BUS_NAME = "org.freedesktop.DBus"
+    DBUS_OBJECT_PATH = "/org/freedesktop/DBus"
+
+    #: Coalesce bursts of signals (a restart emits several) into one update per unit.
+    WATCH_DEBOUNCE_SECONDS = 0.15
+    #: How often an idle watcher checks that its bus is still connected.
+    WATCH_LIVENESS_SECONDS = 5.0
+    WATCH_MATCH_RULES: tuple[str, ...] = (
+        "type='signal',sender='org.freedesktop.systemd1',"
+        "interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',"
+        "arg0='org.freedesktop.systemd1.Unit'",
+        "type='signal',sender='org.freedesktop.systemd1',"
+        "interface='org.freedesktop.systemd1.Manager',path='/org/freedesktop/systemd1'",
+    )
 
     def __init__(
         self,
@@ -122,6 +166,8 @@ class DbusSystemdAdapter:
             settings = get_settings()
         self._settings: DbusSettingsLike = settings
         self._connection_manager = connection_manager or DbusConnectionManager(self._settings)
+        # Live watchers per bus; systemd only emits unit signals while someone is subscribed.
+        self._subscribers: dict[Any, int] = {}
 
     def _get_variant_value(self, variant: object) -> str:
         """Helper to extract unwrapped value from a D-Bus Variant or object."""
@@ -842,3 +888,272 @@ class DbusSystemdAdapter:
         await self.reload_daemon(scope=valid_scope)
         logger.info("[%s] Created unit file at %s and reloaded daemon", valid_scope, target_file)
         return str(target_file)
+
+    # --- Live updates ---
+
+    async def _call_bus_daemon(self, bus: Any, member: str, rule: str) -> None:
+        """Call ``AddMatch``/``RemoveMatch`` on the bus daemon."""
+        reply = await bus.call(
+            Message(
+                destination=self.DBUS_BUS_NAME,
+                path=self.DBUS_OBJECT_PATH,
+                interface=self.DBUS_BUS_NAME,
+                member=member,
+                signature="s",
+                body=[rule],
+            )
+        )
+        if reply.message_type == MessageType.ERROR:
+            raise SystemdConnectionError(f"D-Bus {member} failed: {reply.error_name}")
+
+    async def _call_manager(self, bus: Any, member: str) -> Message:
+        return await bus.call(
+            Message(
+                destination=self.SYSTEMD_BUS_NAME,
+                path=self.SYSTEMD_OBJECT_PATH,
+                interface=self.MANAGER_INTERFACE,
+                member=member,
+            )
+        )
+
+    async def _subscribe(self, bus: Any) -> None:
+        """Ask systemd to emit unit signals; reference-counted per bus connection."""
+        count = self._subscribers.get(bus, 0)
+        self._subscribers[bus] = count + 1
+        if count:
+            return
+        reply = await self._call_manager(bus, "Subscribe")
+        # Older systemd answers a repeated Subscribe with AlreadySubscribed; that is fine.
+        if reply.message_type == MessageType.ERROR and "AlreadySubscribed" not in (
+            reply.error_name or ""
+        ):
+            self._subscribers.pop(bus, None)
+            self._handle_error_reply(reply, "subscribe", "systemd")
+
+    async def _unsubscribe(self, bus: Any) -> None:
+        count = self._subscribers.get(bus, 0) - 1
+        if count > 0:
+            self._subscribers[bus] = count
+            return
+        self._subscribers.pop(bus, None)
+        if bus.connected:
+            with contextlib.suppress(Exception):
+                await self._call_manager(bus, "Unsubscribe")
+
+    async def _snapshot_service(self, bus: Any, name: str, scope: str) -> Service | None:
+        """Current state of ``name`` without loading it (``None`` if it no longer exists).
+
+        ``LoadUnit`` is avoided on purpose: loading a unit systemd just garbage-collected
+        would emit ``UnitNew`` and fight the collector forever.
+        """
+        reply = await bus.call(
+            Message(
+                destination=self.SYSTEMD_BUS_NAME,
+                path=self.SYSTEMD_OBJECT_PATH,
+                interface=self.MANAGER_INTERFACE,
+                member="GetUnit",
+                signature="s",
+                body=[name],
+            )
+        )
+        if reply.message_type == MessageType.ERROR:
+            # Not loaded: it still exists if a unit file is installed for it.
+            file_reply = await bus.call(
+                Message(
+                    destination=self.SYSTEMD_BUS_NAME,
+                    path=self.SYSTEMD_OBJECT_PATH,
+                    interface=self.MANAGER_INTERFACE,
+                    member="GetUnitFileState",
+                    signature="s",
+                    body=[name],
+                )
+            )
+            if file_reply.message_type == MessageType.ERROR or not file_reply.body:
+                return None
+            return Service(
+                name=name,
+                description="",
+                load_state="loaded",
+                active_state="inactive",
+                sub_state="dead",
+                unit_file_state=str(file_reply.body[0]),
+                scope=scope,
+            )
+
+        props_reply = await bus.call(
+            Message(
+                destination=self.SYSTEMD_BUS_NAME,
+                path=str(reply.body[0]),
+                interface=self.PROPERTIES_INTERFACE,
+                member="GetAll",
+                signature="s",
+                body=[self.UNIT_INTERFACE],
+            )
+        )
+        if props_reply.message_type == MessageType.ERROR or not props_reply.body:
+            return None
+        props = props_reply.body[0]
+
+        def prop(key: str, default: str = "unknown") -> str:
+            return self._get_variant_value(props[key]) if key in props else default
+
+        return Service(
+            name=name,
+            description=prop("Description", ""),
+            load_state=prop("LoadState"),
+            active_state=prop("ActiveState"),
+            sub_state=prop("SubState"),
+            unit_file_state=prop("UnitFileState") or "unknown",
+            scope=scope,
+        )
+
+    async def watch_services(self, scope: str = "user") -> AsyncIterator[ServiceEvent]:
+        """Yield live service changes from systemd's D-Bus signals.
+
+        The first event is ``ready``, sent once the signal subscription is in place, so a
+        caller can list services after it without missing changes in between. The watch
+        ends with ``SystemdConnectionError`` if the bus connection is lost.
+        """
+        valid_scope = validate_scope(scope)
+        bus = await self._connection_manager.get_bus(valid_scope)
+        pending: set[str] = set()
+        resync = False
+        wake = asyncio.Event()
+
+        def on_message(msg: Message) -> None:
+            nonlocal resync
+            if msg.message_type != MessageType.SIGNAL:
+                return
+            name: str | None = None
+            if msg.interface == self.PROPERTIES_INTERFACE and msg.member == "PropertiesChanged":
+                if msg.body and msg.body[0] == self.UNIT_INTERFACE:
+                    name = unit_name_from_path(msg.path or "")
+            elif msg.interface == self.MANAGER_INTERFACE and msg.path == self.SYSTEMD_OBJECT_PATH:
+                if msg.member in ("UnitNew", "UnitRemoved") and msg.body:
+                    name = str(msg.body[0])
+                elif msg.member == "UnitFilesChanged" or (
+                    msg.member == "Reloading" and msg.body and msg.body[0] is False
+                ):
+                    resync = True
+                    wake.set()
+                    return
+            if name and name.endswith(".service"):
+                pending.add(name)
+                wake.set()
+
+        bus.add_message_handler(on_message)
+        added_rules: list[str] = []
+        subscribed = False
+        try:
+            try:
+                for rule in self.WATCH_MATCH_RULES:
+                    await self._call_bus_daemon(bus, "AddMatch", rule)
+                    added_rules.append(rule)
+                await self._subscribe(bus)
+                subscribed = True
+            except (PermissionDeniedError, ServiceOperationError, SystemdConnectionError):
+                raise
+            except Exception as exc:
+                raise SystemdConnectionError(
+                    f"Failed to watch {valid_scope} systemd for changes: {exc}"
+                ) from exc
+
+            yield ServiceEvent(kind="ready", scope=valid_scope)
+
+            while True:
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=self.WATCH_LIVENESS_SECONDS)
+                except TimeoutError:
+                    if not bus.connected:
+                        raise SystemdConnectionError(
+                            f"Lost the {valid_scope} D-Bus connection while watching services."
+                        ) from None
+                    continue
+                await asyncio.sleep(self.WATCH_DEBOUNCE_SECONDS)
+                wake.clear()
+                names, pending = pending, set()
+                do_resync, resync = resync, False
+
+                if do_resync:
+                    yield ServiceEvent(kind="resync", scope=valid_scope)
+                for name in sorted(names):
+                    try:
+                        service = await self._snapshot_service(bus, name, valid_scope)
+                    except Exception as exc:
+                        if not bus.connected:
+                            raise SystemdConnectionError(
+                                f"Lost the {valid_scope} D-Bus connection while watching services."
+                            ) from exc
+                        logger.debug("[%s] Could not read state of %s: %s", valid_scope, name, exc)
+                        continue
+                    if service is None:
+                        yield ServiceEvent(kind="removed", scope=valid_scope, name=name)
+                    else:
+                        yield ServiceEvent(
+                            kind="changed", scope=valid_scope, name=name, service=service
+                        )
+        finally:
+            bus.remove_message_handler(on_message)
+            if bus.connected:
+                for rule in added_rules:
+                    with contextlib.suppress(Exception):
+                        await self._call_bus_daemon(bus, "RemoveMatch", rule)
+            if subscribed:
+                await self._unsubscribe(bus)
+
+    @staticmethod
+    def _journalctl_command(name: str, lines: int, scope: str, *, follow: bool) -> list[str]:
+        unit_flag = "-u" if scope == "system" else "--user-unit"
+        cmd = ["journalctl", unit_flag, name, "-n", str(lines), "--no-pager"]
+        if follow:
+            cmd.append("--follow")
+        return cmd
+
+    async def follow_service_logs(
+        self, name: str, lines: int = 200, scope: str = "user"
+    ) -> AsyncIterator[str]:
+        """Yield the last ``lines`` journal lines of ``name``, then new lines as they arrive.
+
+        Runs ``journalctl --follow``; the first item is ``""`` once it has started. The
+        process is terminated when the caller stops iterating.
+        """
+        valid_scope = validate_scope(scope)
+        normalized_name = normalize_service_name(name)
+        safe_lines = max(0, min(2000, lines))
+        cmd = self._journalctl_command(normalized_name, safe_lines, valid_scope, follow=True)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except OSError as exc:
+            raise ServiceOperationError(
+                normalized_name, "logs", f"Failed to execute journalctl: {exc}"
+            ) from exc
+
+        assert proc.stdout is not None
+        try:
+            yield ""
+            while True:
+                raw = await proc.stdout.readline()
+                if not raw:
+                    break
+                yield raw.decode(errors="replace").rstrip("\n")
+            status = await proc.wait()
+            if status != 0:
+                raise ServiceOperationError(
+                    normalized_name, "logs", f"journalctl exited with status {status}"
+                )
+        finally:
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except TimeoutError:
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    await proc.wait()

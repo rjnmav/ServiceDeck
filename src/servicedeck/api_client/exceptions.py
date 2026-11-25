@@ -19,6 +19,16 @@ class ServiceDeckConnectionError(ServiceDeckAPIError):
     """Raised when communication with the ServiceDeck backend fails (network/timeout)."""
 
 
+class ServiceDeckStreamError(ServiceDeckAPIError):
+    """Raised when a live stream (events, followed logs) ends with an error event."""
+
+    def __init__(
+        self, message: str, error_type: str | None = None, details: dict[str, Any] | None = None
+    ) -> None:
+        super().__init__(message, details)
+        self.error_type = error_type or "StreamError"
+
+
 class ServiceDeckHTTPError(ServiceDeckAPIError):
     """Raised when the ServiceDeck backend returns an HTTP error status code."""
 

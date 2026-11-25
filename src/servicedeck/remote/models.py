@@ -71,6 +71,28 @@ class AuthResponseMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class EventMessage:
+    """One item of a stream opened by a ``stream.*`` request (agent to client).
+
+    ``stream`` is the id of the request that opened it. The last event of every stream
+    is ``end``; its ``data`` is ``None`` or ``{"error": {code, message, details}}``.
+    """
+
+    type: Literal["event"] = "event"
+    stream: int = 0
+    event: str = ""
+    data: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class CancelMessage:
+    """Ask the agent to stop the stream opened by request ``stream`` (client to agent)."""
+
+    type: Literal["cancel"] = "cancel"
+    stream: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class GoodbyeMessage:
     """Graceful connection termination notification."""
 
@@ -84,6 +106,8 @@ ProtocolMessage = (
     | ResponseMessage
     | AuthChallengeMessage
     | AuthResponseMessage
+    | EventMessage
+    | CancelMessage
     | GoodbyeMessage
 )
 
@@ -111,7 +135,9 @@ __all__ = [
     "PROTOCOL_VERSION",
     "AuthChallengeMessage",
     "AuthResponseMessage",
+    "CancelMessage",
     "ErrorDetail",
+    "EventMessage",
     "GoodbyeMessage",
     "HelloMessage",
     "ProtocolMessage",

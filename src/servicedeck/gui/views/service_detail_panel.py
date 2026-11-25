@@ -1,5 +1,6 @@
 """Dock widget presenting detailed properties, unit file, logs, and live resource usage."""
 
+import collections
 import os
 import time
 from datetime import datetime
@@ -8,11 +9,16 @@ from typing import Any
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDockWidget,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QPushButton,
     QTabWidget,
     QTextEdit,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -24,6 +30,12 @@ from servicedeck.api_client.models.service import (
     ServiceUnitFile,
 )
 from servicedeck.gui.workers.service_worker import run_async_task
+from servicedeck.gui.workers.stream_worker import StreamWorker
+
+#: Journal lines kept in memory for the log view (and its filter).
+LOG_BUFFER_LINES = 5000
+#: Recent lines fetched when following starts.
+LOG_INITIAL_LINES = 200
 
 
 def format_bytes(bytes_val: int | float | None) -> str:
@@ -89,6 +101,13 @@ class ServiceDetailPanel(QDockWidget):
         self._previous_write_bytes: int | None = None
         self._previous_sample_time: float | None = None
 
+        # Followed logs (journalctl -f style)
+        self._log_lines: collections.deque[str] = collections.deque(maxlen=LOG_BUFFER_LINES)
+        self._pending_log_lines: list[str] = []
+        self._log_worker: StreamWorker | None = None
+        self._retired_workers: dict[int, StreamWorker] = {}
+        self._log_filter = ""
+
         self._setup_ui()
         self._setup_timers()
 
@@ -104,6 +123,12 @@ class ServiceDetailPanel(QDockWidget):
         self._resource_timer = QTimer(self)
         self._resource_timer.setInterval(2000)  # 2 seconds default
         self._resource_timer.timeout.connect(self.refresh_resource_usage)
+
+        # Coalesces bursts of followed lines into one view update.
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setSingleShot(True)
+        self._log_flush_timer.setInterval(50)
+        self._log_flush_timer.timeout.connect(self._flush_log_lines)
 
     def set_refresh_intervals(self, log_interval_sec: int, res_interval_sec: int) -> None:
         """Update polling timer intervals in seconds."""
@@ -165,11 +190,48 @@ class ServiceDetailPanel(QDockWidget):
         self._tab_widget.addTab(self._unit_file_edit, "Unit File")
 
         # ─── Tab 3: Service Logs ───
+        logs_widget = QWidget()
+        logs_layout = QVBoxLayout(logs_widget)
+        logs_layout.setContentsMargins(0, 4, 0, 0)
+        logs_layout.setSpacing(4)
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(8, 0, 8, 0)
+        self._follow_check = QCheckBox("Follow")
+        self._follow_check.setObjectName("logFollowToggle")
+        self._follow_check.setChecked(True)
+        self._follow_check.setToolTip(
+            "Stream new journal lines as they are written (pause to stop)"
+        )
+        self._follow_check.toggled.connect(self._on_follow_toggled)
+        self._autoscroll_check = QCheckBox("Auto-scroll")
+        self._autoscroll_check.setObjectName("logAutoScrollToggle")
+        self._autoscroll_check.setChecked(True)
+        self._autoscroll_check.toggled.connect(self._on_autoscroll_toggled)
+        self._log_filter_edit = QLineEdit()
+        self._log_filter_edit.setObjectName("logFilter")
+        self._log_filter_edit.setPlaceholderText("Filter log lines…")
+        self._log_filter_edit.setClearButtonEnabled(True)
+        self._log_filter_edit.textChanged.connect(self._on_log_filter_changed)
+        self._log_clear_button = QPushButton("Clear")
+        self._log_clear_button.setObjectName("logClearButton")
+        self._log_clear_button.clicked.connect(self.clear_log_view)
+        self._log_status = QLabel("")
+        self._log_status.setObjectName("logStatus")
+        controls.addWidget(self._follow_check)
+        controls.addWidget(self._autoscroll_check)
+        controls.addWidget(self._log_filter_edit, 1)
+        controls.addWidget(self._log_clear_button)
+        controls.addWidget(self._log_status)
+        logs_layout.addLayout(controls)
+
         self._log_edit = QTextEdit()
         self._log_edit.setReadOnly(True)
         self._log_edit.setObjectName("serviceLogViewer")
         self._log_edit.setFont(mono_font)
-        self._tab_widget.addTab(self._log_edit, "Service Logs")
+        self._log_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        logs_layout.addWidget(self._log_edit, 1)
+        self._tab_widget.addTab(logs_widget, "Service Logs")
 
         # ─── Tab 4: Resource Usage ───
         res_widget = QWidget()
@@ -204,7 +266,8 @@ class ServiceDetailPanel(QDockWidget):
         if index == 1:  # Unit File
             self.refresh_unit_file()
         elif index == 2:  # Logs
-            self.refresh_service_logs()
+            if not self.is_following_logs:
+                self.refresh_service_logs()
         elif index == 3:  # Resources
             self.refresh_resource_usage()
 
@@ -219,7 +282,25 @@ class ServiceDetailPanel(QDockWidget):
         self._current_scope = scope or service.scope
         self._current_device_id = device_id
         self.reset_resource_usage_state()
+        self._apply_service_properties(service)
+        self._path_val.setText("-")
 
+        # Trigger data fetching
+        self.refresh_unit_file()
+        self.refresh_resource_usage()
+        self._resource_timer.start()
+        self._restart_log_view()
+
+        self.show()
+
+    def update_service_state(self, service: Service) -> None:
+        """Refresh the shown properties after a live change, without reloading the tabs."""
+        if self._current_service is None or self._current_service.name != service.name:
+            return
+        self._current_service = service
+        self._apply_service_properties(service)
+
+    def _apply_service_properties(self, service: Service) -> None:
         self._name_val.setText(service.name)
         self._desc_val.setText(service.description or "(None)")
         self._active_val.setText(service.active_state.upper())
@@ -227,7 +308,6 @@ class ServiceDetailPanel(QDockWidget):
         self._load_val.setText(service.load_state)
         self._enabled_val.setText(service.unit_file_state.upper())
         self._scope_val.setText(self._current_scope.upper())
-        self._path_val.setText("-")
 
         # Active state coloring
         active = service.active_state.lower()
@@ -250,16 +330,6 @@ class ServiceDetailPanel(QDockWidget):
             self._enabled_val.setStyleSheet("color: #795548; font-weight: bold;")
         else:
             self._enabled_val.setStyleSheet("color: #9E9E9E;")
-
-        # Trigger data fetching
-        self.refresh_unit_file()
-        self.refresh_service_logs()
-        self.refresh_resource_usage()
-
-        self._log_timer.start()
-        self._resource_timer.start()
-
-        self.show()
 
     def refresh_unit_file(self) -> None:
         """Fetch on-disk unit file content asynchronously."""
@@ -301,13 +371,15 @@ class ServiceDetailPanel(QDockWidget):
         def on_success(res: ServiceLogs) -> None:
             if not self._current_service or self._current_service.name != service_name:
                 return
+            if self.is_following_logs:
+                return
             scrollbar = self._log_edit.verticalScrollBar()
-            was_at_bottom = scrollbar.value() >= (scrollbar.maximum() - 25)
-            self._log_edit.setPlainText(res.logs)
-            if was_at_bottom:
-                cursor = self._log_edit.textCursor()
-                cursor.movePosition(QTextCursor.MoveOperation.End)
-                self._log_edit.setTextCursor(cursor)
+            position = scrollbar.value()
+            self._log_lines.clear()
+            self._log_lines.extend(res.logs.splitlines())
+            self._render_log_lines()
+            if not self._autoscroll_check.isChecked():
+                scrollbar.setValue(position)
 
         def on_error(msg: str, exc: Any) -> None:
             if not self._current_service or self._current_service.name != service_name:
@@ -317,6 +389,149 @@ class ServiceDetailPanel(QDockWidget):
                 self._log_edit.setPlainText(f"# Failed to load logs:\n# {msg}")
 
         run_async_task(task, on_success=on_success, on_error=on_error)
+
+    # --- Followed logs ---
+
+    @property
+    def is_following_logs(self) -> bool:
+        """True while a live log stream is open for the shown service."""
+        return self._log_worker is not None
+
+    def _restart_log_view(self) -> None:
+        """Start over for the current service: follow its journal, or poll when paused."""
+        self._stop_log_follow()
+        self._log_timer.stop()
+        self.clear_log_view()
+        if self._follow_check.isChecked():
+            self._start_log_follow()
+        else:
+            self._log_status.setText("Paused")
+            self.refresh_service_logs()
+
+    def _start_log_follow(self) -> None:
+        if not self._client or not self._current_service:
+            return
+        client = self._client
+        name = self._current_service.name
+        scope = self._current_scope
+        device_id = self._current_device_id
+
+        worker = StreamWorker(
+            lambda: client.follow_logs(
+                name, lines=LOG_INITIAL_LINES, scope=scope, device_id=device_id
+            ),
+            name="logs",
+        )
+        worker.signals.item.connect(self._on_log_line)
+        worker.signals.failed.connect(self._on_log_follow_failed)
+        worker.signals.finished.connect(self._on_log_worker_finished)
+        self._log_worker = worker
+        self._log_status.setText("Following")
+        self._log_status.setToolTip("")
+        worker.start()
+
+    def _stop_log_follow(self) -> None:
+        worker, self._log_worker = self._log_worker, None
+        if worker is not None:
+            worker.stop()
+            self._retired_workers[worker.token] = worker
+        self._pending_log_lines.clear()
+
+    def _is_current_log_worker(self, token: int) -> bool:
+        return self._log_worker is not None and self._log_worker.token == token
+
+    def _on_log_line(self, token: int, line: str) -> None:
+        if not self._is_current_log_worker(token):
+            return
+        self._pending_log_lines.append(line)
+        if not self._log_flush_timer.isActive():
+            self._log_flush_timer.start()
+
+    def _flush_log_lines(self) -> None:
+        lines, self._pending_log_lines = self._pending_log_lines, []
+        if not lines:
+            return
+        self._log_lines.extend(lines)
+        shown = [line for line in lines if self._matches_log_filter(line)]
+        if not shown:
+            return
+        scrollbar = self._log_edit.verticalScrollBar()
+        position = scrollbar.value()
+        cursor = QTextCursor(self._log_edit.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        prefix = "\n" if not self._log_edit.document().isEmpty() else ""
+        cursor.insertText(prefix + "\n".join(shown))
+        self._trim_log_view()
+        if self._autoscroll_check.isChecked():
+            self._scroll_logs_to_end()
+        else:
+            scrollbar.setValue(position)
+
+    def _trim_log_view(self) -> None:
+        document = self._log_edit.document()
+        excess = document.blockCount() - LOG_BUFFER_LINES
+        if excess <= 0:
+            return
+        cursor = QTextCursor(document)
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        cursor.movePosition(
+            QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor, excess
+        )
+        cursor.removeSelectedText()
+
+    def _scroll_logs_to_end(self) -> None:
+        scrollbar = self._log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _on_log_follow_failed(self, token: int, message: str, exc: Any) -> None:
+        if not self._is_current_log_worker(token):
+            return
+        self._log_worker = None
+        # Fall back to periodic polling (e.g. an older backend without streaming).
+        self._log_status.setText(f"Polling every {self._log_timer.interval() // 1000}s")
+        self._log_status.setToolTip(f"Live log follow unavailable: {message}")
+        self.refresh_service_logs()
+        self._log_timer.start()
+
+    def _on_log_worker_finished(self, token: int) -> None:
+        self._retired_workers.pop(token, None)
+        if self._is_current_log_worker(token):
+            # The stream ended on its own (journalctl exited); show what we have.
+            self._log_worker = None
+            self._log_status.setText("Stopped")
+
+    def _on_follow_toggled(self, checked: bool) -> None:
+        if not self._current_service:
+            return
+        if checked:
+            self._restart_log_view()
+        else:
+            self._stop_log_follow()
+            self._log_status.setText("Paused")
+
+    def _on_autoscroll_toggled(self, checked: bool) -> None:
+        if checked:
+            self._scroll_logs_to_end()
+
+    def _matches_log_filter(self, line: str) -> bool:
+        return not self._log_filter or self._log_filter in line.lower()
+
+    def _on_log_filter_changed(self, text: str) -> None:
+        self._log_filter = text.strip().lower()
+        self._render_log_lines()
+
+    def _render_log_lines(self) -> None:
+        self._log_edit.setPlainText(
+            "\n".join(line for line in self._log_lines if self._matches_log_filter(line))
+        )
+        if self._autoscroll_check.isChecked():
+            self._scroll_logs_to_end()
+
+    def clear_log_view(self) -> None:
+        """Empty the log view and its buffer (following continues)."""
+        self._log_lines.clear()
+        self._pending_log_lines.clear()
+        self._log_edit.clear()
 
     def refresh_resource_usage(self) -> None:
         """Fetch runtime resource metrics and compute CPU / I/O rates."""
@@ -443,9 +658,10 @@ class ServiceDetailPanel(QDockWidget):
         self._previous_sample_time = None
 
     def stop_timers(self) -> None:
-        """Stop periodic polling timers."""
+        """Stop periodic polling timers and the live log stream."""
         self._log_timer.stop()
         self._resource_timer.stop()
+        self._stop_log_follow()
 
     def clear(self) -> None:
         """Reset panel to empty state and stop polling."""
@@ -462,8 +678,24 @@ class ServiceDetailPanel(QDockWidget):
         self._path_val.setText("-")
         self._scope_val.setText("-")
         self._unit_file_edit.clear()
-        self._log_edit.clear()
+        self.clear_log_view()
+        self._log_status.setText("")
+        self._log_status.setToolTip("")
         self.reset_resource_usage_state()
+
+    def showEvent(self, event: Any) -> None:
+        """Resume live data when the panel comes back (e.g. after being hidden)."""
+        super().showEvent(event)
+        if self._current_service is None:
+            return
+        if not self._resource_timer.isActive():
+            self._resource_timer.start()
+        if (
+            self._follow_check.isChecked()
+            and not self.is_following_logs
+            and not self._log_timer.isActive()
+        ):
+            self._restart_log_view()
 
     def hideEvent(self, event: Any) -> None:
         """Stop background timers when panel is hidden."""

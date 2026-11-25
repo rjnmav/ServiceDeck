@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from PySide6.QtCore import QFile, QItemSelection, QPoint, Qt
+from PySide6.QtCore import QFile, QItemSelection, QPoint, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -22,6 +22,7 @@ from servicedeck.api_client.models.remote import RemoteDevice
 from servicedeck.api_client.models.service import (
     DaemonReloadResult,
     Service,
+    ServiceEvent,
     ServiceOperationResult,
 )
 from servicedeck.gui.models.service_filter_model import ServiceFilterModel
@@ -42,6 +43,10 @@ from servicedeck.gui.views.dialogs.remote_onboarding import (
 from servicedeck.gui.views.service_detail_panel import ServiceDetailPanel
 from servicedeck.gui.views.service_toolbar import ServiceToolbar
 from servicedeck.gui.workers.service_worker import run_async_task
+from servicedeck.gui.workers.stream_worker import StreamWorker
+
+#: Reconnect delays (seconds) after the live update stream drops, growing per failure.
+LIVE_RETRY_DELAYS = (2, 5, 10, 30, 60)
 
 
 class MainWindow(QMainWindow):
@@ -60,6 +65,20 @@ class MainWindow(QMainWindow):
         self._elevated_devices: set[str] = set()
         self._log_refresh_interval = 5
         self._resource_refresh_interval = 2
+
+        # Live updates: one event stream for the shown (device, scope).
+        self._live_worker: StreamWorker | None = None
+        self._live_key: tuple[str | None, str] | None = None
+        self._live_connected = False
+        self._live_failures = 0
+        self._retired_workers: dict[int, StreamWorker] = {}
+        self._live_retry_timer = QTimer(self)
+        self._live_retry_timer.setSingleShot(True)
+        self._live_retry_timer.timeout.connect(self._ensure_live_updates)
+        self._resync_timer = QTimer(self)
+        self._resync_timer.setSingleShot(True)
+        self._resync_timer.setInterval(300)
+        self._resync_timer.timeout.connect(self._refresh_in_place)
 
         self.setWindowTitle("ServiceDeck — Systemd Service Manager (Local)")
         self.setMinimumSize(900, 500)
@@ -162,14 +181,20 @@ class MainWindow(QMainWindow):
             self._admin_button.clicked.connect(self._on_drop_admin_clicked)
             self._admin_button.hide()
 
+            self._live_label = QLabel()
+            self._live_label.setObjectName("liveIndicator")
+
             status_bar.addWidget(self._status_label, 1)
             status_bar.addPermanentWidget(self._admin_button)
+            status_bar.addPermanentWidget(self._live_label)
             status_bar.addPermanentWidget(self._count_label)
         else:
             self._status_label = QLabel()
             self._count_label = QLabel()
             self._admin_button = QPushButton()
             self._admin_button.hide()
+            self._live_label = QLabel()
+        self._set_live_indicator(False, "Live updates are not connected yet.")
 
     def _connect_signals(self) -> None:
         # Toolbar actions
@@ -228,6 +253,7 @@ class MainWindow(QMainWindow):
             self._toolbar.set_hosts(devices, self._current_device_id)
             self._populate_table(services)
             self.set_status(f"Connected to backend ({active_scope} scope)", success=True)
+            self._ensure_live_updates()
 
         def on_error(msg: str, exc: Any) -> None:
             self.set_status(f"Backend unavailable: {msg}", success=False)
@@ -256,6 +282,7 @@ class MainWindow(QMainWindow):
             self._populate_table(services)
             host_label = self._get_host_display_name()
             self.set_status(f"Loaded {len(services)} services ({host_label})", success=True)
+            self._ensure_live_updates()
 
         def on_error(msg: str, exc: Any) -> None:
             self._is_busy = False
@@ -348,7 +375,8 @@ class MainWindow(QMainWindow):
             self._is_busy = False
             msg = res.message or f"Service '{name}' {op_name}ed successfully."
             self.set_status(msg, success=True)
-            self.request_service_list()
+            self._toolbar.set_actions_enabled(self._selected_service_name() is not None)
+            self._refresh_after_change()
 
         def on_error(msg: str, exc: Any) -> None:
             self._is_busy = False
@@ -427,7 +455,7 @@ class MainWindow(QMainWindow):
         def on_success(res: DaemonReloadResult) -> None:
             self._is_busy = False
             self.set_status(res.message or "Daemon reloaded successfully.", success=True)
-            self.request_service_list()
+            self._refresh_after_change()
 
         def on_error(msg: str, exc: Any) -> None:
             self._is_busy = False
@@ -496,6 +524,7 @@ class MainWindow(QMainWindow):
             self.set_status(
                 f"Switched to {active_scope} scope ({len(services)} services)", success=True
             )
+            self._ensure_live_updates()
 
         def on_error(msg: str, exc: Any) -> None:
             self._is_busy = False
@@ -507,6 +536,133 @@ class MainWindow(QMainWindow):
             self.set_status(f"Failed to switch scope: {msg}", success=False)
 
         run_async_task(task, on_start=on_start, on_success=on_success, on_error=on_error)
+
+    # --- Live updates ---
+
+    @property
+    def live_updates_connected(self) -> bool:
+        """True while the event stream for the shown host and scope is open."""
+        return self._live_connected
+
+    def _ensure_live_updates(self) -> None:
+        """Watch the shown (device, scope) for changes, replacing any other stream."""
+        key = (self._current_device_id, self._current_scope)
+        if self._live_worker is not None and self._live_key == key:
+            return
+        self._stop_live_updates()
+        self._live_retry_timer.stop()
+        self._live_key = key
+        device_id, scope = key
+        client = self.client
+        worker = StreamWorker(
+            lambda: client.watch_services(scope=scope, device_id=device_id), name="events"
+        )
+        worker.signals.item.connect(self._on_live_event)
+        worker.signals.failed.connect(self._on_live_failed)
+        worker.signals.finished.connect(self._on_live_finished)
+        self._live_worker = worker
+        worker.start()
+
+    def _stop_live_updates(self) -> None:
+        worker, self._live_worker = self._live_worker, None
+        self._live_key = None
+        if worker is not None:
+            worker.stop()
+            self._retired_workers[worker.token] = worker
+        self._set_live_indicator(False, "Live updates stopped.")
+
+    def _is_current_live_worker(self, token: int) -> bool:
+        return self._live_worker is not None and self._live_worker.token == token
+
+    def _set_live_indicator(self, connected: bool, tooltip: str) -> None:
+        self._live_connected = connected
+        self._live_label.setText("\u25cf Live" if connected else "\u25cb Live")
+        self._live_label.setStyleSheet(
+            "color: #4CAF50; font-weight: 500;" if connected else "color: #9E9E9E;"
+        )
+        self._live_label.setToolTip(tooltip)
+
+    def _on_live_event(self, token: int, event: ServiceEvent) -> None:
+        if not self._is_current_live_worker(token):
+            return
+        if event.kind == "ready":
+            self._live_failures = 0
+            self._set_live_indicator(
+                True, "Live updates on: the list follows changes as systemd reports them."
+            )
+            # Changes between the last list and the subscription would be missed otherwise.
+            self._resync_timer.start()
+        elif event.kind == "resync":
+            self._resync_timer.start()
+        elif event.kind == "changed" and event.service is not None:
+            self._apply_live_change(event.service)
+        elif event.kind == "removed" and event.name:
+            self._table_model.remove_service(event.name)
+            self._count_label.setText(f"{self._table_model.rowCount()} services")
+
+    def _apply_live_change(self, service: Service) -> None:
+        previous, current = self._table_model.apply_service_change(service)
+        if previous is None:
+            self._count_label.setText(f"{self._table_model.rowCount()} services")
+        if current.is_failed and (previous is None or not previous.is_failed):
+            self.set_status(f"\u26a0 {current.name} failed ({current.sub_state})", success=False)
+        if self._selected_service_name() == current.name:
+            self._detail_panel.update_service_state(current)
+
+    def _on_live_failed(self, token: int, message: str, exc: Any) -> None:
+        if not self._is_current_live_worker(token):
+            return
+        self._live_worker = None
+        self._schedule_live_retry(f"Live updates unavailable: {message}")
+
+    def _on_live_finished(self, token: int) -> None:
+        self._retired_workers.pop(token, None)
+        if self._is_current_live_worker(token):
+            self._live_worker = None
+            self._schedule_live_retry("Live updates ended; reconnecting.")
+
+    def _schedule_live_retry(self, reason: str) -> None:
+        delay = LIVE_RETRY_DELAYS[min(self._live_failures, len(LIVE_RETRY_DELAYS) - 1)]
+        self._live_failures += 1
+        self._live_key = None
+        self._set_live_indicator(False, f"{reason}\nRetrying in {delay}s.")
+        self._live_retry_timer.start(delay * 1000)
+
+    def _refresh_after_change(self) -> None:
+        """After an action: update rows in place if live, else reload the list."""
+        if self._live_connected:
+            self._refresh_in_place()
+        else:
+            self.request_service_list()
+
+    def _refresh_in_place(self) -> None:
+        """Re-list services and merge them into the table, keeping the selection."""
+        device_id, scope = self._current_device_id, self._current_scope
+
+        def on_success(services: list[Service]) -> None:
+            if (device_id, scope) != (self._current_device_id, self._current_scope):
+                return
+            self._table_model.merge_services(services)
+            self._count_label.setText(f"{self._table_model.rowCount()} services")
+            name = self._selected_service_name()
+            service = self._table_model.service_by_name(name) if name else None
+            if service is not None:
+                self._detail_panel.update_service_state(service)
+
+        run_async_task(
+            self.client.list_services,
+            scope=scope,
+            device_id=device_id,
+            on_success=on_success,
+            on_error=lambda msg, _exc: None,
+        )
+
+    def closeEvent(self, event: Any) -> None:
+        """Close live streams before the window goes away."""
+        self._live_retry_timer.stop()
+        self._stop_live_updates()
+        self._detail_panel.stop_timers()
+        super().closeEvent(event)
 
     def _get_host_display_name(self) -> str:
         """Return human-readable display name of currently active host target."""
@@ -577,6 +733,9 @@ class MainWindow(QMainWindow):
     def _on_target_host_changed(self, device_id: str | None) -> None:
         """Switch target host and refresh service inventory."""
         self._current_device_id = device_id
+        self._stop_live_updates()
+        self._live_retry_timer.stop()
+        self._live_failures = 0
         self._update_admin_indicator()
         self._update_window_title()
         self._detail_panel.clear()

@@ -10,7 +10,9 @@ ServiceDeck is a modern Linux system service management and monitoring platform.
 - **Polkit Aware**: Supports interactive desktop authorization prompts for privileged operations and maps access errors cleanly.
 - **FastAPI Backend**: Type-safe REST API with automatic OpenAPI documentation.
 - **PySide6 Desktop Client**: Responsive GUI for inspecting, starting, stopping, restarting, enabling, and disabling user and system services.
-- **Unified CLI**: Single entry point to launch backend, GUI, or inspect status.
+- **Live Updates**: The service list follows systemd's D-Bus change signals (locally and on remote hosts), updating rows in place and highlighting state changes such as a crash.
+- **Followed Logs**: `journalctl -f` style log view with pause, auto-scroll and filtering.
+- **Unified CLI**: Single entry point to launch the backend or GUI, and to list, inspect, control and tail services from scripts and terminals.
 
 ---
 
@@ -48,6 +50,25 @@ servicedeck backend
 # Start desktop GUI client
 servicedeck gui
 ```
+
+With the backend running, manage services straight from the terminal. `--host <device>`
+targets a configured remote machine, `--scope system` (or `--system`) the system services,
+and `--json` gives machine-readable output:
+
+```bash
+servicedeck list                       # all user services
+servicedeck list --system --failed     # failed system services
+servicedeck list 'pipewire*' --json    # glob filter, JSON output
+servicedeck status nginx --host srv1 --system
+servicedeck restart nginx php-fpm --host srv1 --system
+servicedeck enable --system nginx
+servicedeck logs nginx -n 50 --system  # last 50 journal lines
+servicedeck logs nginx -f --system     # follow, like journalctl -f (Ctrl-C to stop)
+```
+
+`status` exits with 0 when the service is active, 3 when it is not, and 4 when it does not
+exist (as `systemctl status` does). If a remote system-service command needs administrator
+access, the CLI tries passwordless sudo and otherwise asks for the sudo password once.
 
 ### 2. Standalone Entry Points
 

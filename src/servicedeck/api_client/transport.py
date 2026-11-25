@@ -1,6 +1,7 @@
 """HTTP transport layer for the ServiceDeck API client."""
 
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import httpx
 
@@ -16,6 +17,11 @@ from servicedeck.api_client.exceptions import (
     ServiceOperationError,
     ServicePermissionDeniedError,
 )
+
+if TYPE_CHECKING:
+    from servicedeck.api_client.streaming import EventStream
+
+T = TypeVar("T")
 
 DEFAULT_TIMEOUT = 10.0
 #: Host-key checks and key setup chain several SSH round trips.
@@ -106,6 +112,24 @@ class SyncTransport:
         if response.content:
             return response.json()
         return None
+
+    def stream(
+        self,
+        path: str,
+        parse: "Callable[[str, Any], T | None]",
+        params: dict[str, Any] | None = None,
+    ) -> "EventStream[T]":
+        """Open a Server-Sent Events stream at ``path`` (see :class:`EventStream`)."""
+        from servicedeck.api_client.streaming import EventStream
+
+        return EventStream(
+            self._client,
+            "/" + path.lstrip("/"),
+            params,
+            parse,
+            base_url=self.base_url,
+            raise_for_status=_raise_for_status,
+        )
 
     def close(self) -> None:
         """Close the underlying HTTP client."""

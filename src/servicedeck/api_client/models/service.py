@@ -1,7 +1,7 @@
 """Service domain models returned by the ServiceDeck API client."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +48,34 @@ class Service:
             unit_file_state=data.get("unit_file_state", "unknown"),
             scope=data.get("scope", "user"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceEvent:
+    """One live change from ``watch_services``.
+
+    ``kind`` is ``ready`` (watching; list services now to start from a fresh state),
+    ``changed`` (``service`` holds the new state), ``removed`` (``name`` is gone) or
+    ``resync`` (bulk change: list services again).
+    """
+
+    kind: Literal["ready", "changed", "removed", "resync"]
+    scope: str = "user"
+    name: str | None = None
+    service: Service | None = None
+
+    @classmethod
+    def from_sse(cls, event: str, data: Any) -> "ServiceEvent | None":
+        """Build from a Server-Sent Event, or return None for an unknown event type."""
+        payload = data if isinstance(data, dict) else {}
+        if event == "service":
+            service = Service.from_dict(payload)
+            return cls(kind="changed", scope=service.scope, name=service.name, service=service)
+        if event == "removed":
+            return cls(kind="removed", scope=payload.get("scope", "user"), name=payload.get("name"))
+        if event in ("ready", "resync"):
+            return cls(kind=event, scope=payload.get("scope", "user"))  # type: ignore[arg-type]
+        return None
 
 
 @dataclass(frozen=True, slots=True)

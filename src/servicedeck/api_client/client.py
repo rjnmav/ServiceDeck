@@ -13,12 +13,20 @@ from servicedeck.api_client.models.service import (
     CreatedService,
     DaemonReloadResult,
     Service,
+    ServiceEvent,
     ServiceLogs,
     ServiceOperationResult,
     ServiceResources,
     ServiceUnitFile,
 )
+from servicedeck.api_client.streaming import EventStream
 from servicedeck.api_client.transport import DEFAULT_TIMEOUT, ONBOARDING_TIMEOUT, SyncTransport
+
+
+def _parse_log_event(event: str, data: Any) -> str | None:
+    if event == "log" and isinstance(data, dict):
+        return str(data.get("line", ""))
+    return None
 
 
 class ServiceDeckClient:
@@ -334,6 +342,39 @@ class ServiceDeckClient:
         endpoint = self._resolve_path(f"/services/{name}/logs", device_id=device_id)
         data = self.transport.request("GET", endpoint, params=params)
         return ServiceLogs.from_dict(data)
+
+    # --- Live streams ---
+
+    def watch_services(
+        self,
+        scope: str | None = None,
+        device_id: str | None = None,
+    ) -> EventStream[ServiceEvent]:
+        """Open a live stream of service changes (first item: ``ready``).
+
+        Blocks until the backend is watching, then returns; iterate the result (usually
+        in a background thread) and ``close()`` it to stop.
+        """
+        params = {"scope": scope} if scope is not None else None
+        endpoint = self._resolve_path("/events", device_id=device_id)
+        return self.transport.stream(endpoint, ServiceEvent.from_sse, params=params)
+
+    def follow_logs(
+        self,
+        name: str,
+        lines: int = 200,
+        scope: str | None = None,
+        device_id: str | None = None,
+    ) -> EventStream[str]:
+        """Follow a service's journal like ``journalctl -f``: the last ``lines``, then new ones.
+
+        Iterating yields one log line (without newline) per item.
+        """
+        params: dict[str, Any] = {"lines": lines}
+        if scope is not None:
+            params["scope"] = scope
+        endpoint = self._resolve_path(f"/services/{name}/logs/follow", device_id=device_id)
+        return self.transport.stream(endpoint, _parse_log_event, params=params)
 
     def create_service(
         self,

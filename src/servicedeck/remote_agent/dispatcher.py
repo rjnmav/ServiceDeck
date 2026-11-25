@@ -2,6 +2,7 @@
 
 import dataclasses
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 from servicedeck.backend.core.service_manager import ServiceManager
@@ -25,6 +26,11 @@ from servicedeck.remote.models import (
 
 logger = logging.getLogger(__name__)
 
+#: Methods that open a stream: answered once, then followed by ``event`` messages.
+STREAM_METHODS = frozenset({"stream.services", "stream.logs"})
+
+StreamItem = tuple[str, Any]
+
 
 class RequestDispatcher:
     """Maps protocol method names to ServiceManager async method calls.
@@ -46,23 +52,35 @@ class RequestDispatcher:
         try:
             result = await self._execute_method(method, params)
             return success_response(request.id, result)
+        except Exception as exc:
+            if not isinstance(exc, ServiceDeckError | ValueError):
+                logger.exception(
+                    "[%d] Unexpected error dispatching '%s': %s", request.id, method, exc
+                )
+            return self.error_response_for(request.id, exc)
+
+    @staticmethod
+    def error_response_for(request_id: int, exc: BaseException) -> ResponseMessage:
+        """Map an exception to the protocol error response the client understands."""
+        try:
+            raise exc
         except ServiceNotFoundError as exc:
             return error_response(
-                request.id,
+                request_id,
                 "SERVICE_NOT_FOUND",
                 exc.message,
                 {"service_name": exc.service_name},
             )
         except InvalidServiceNameError as exc:
             return error_response(
-                request.id,
+                request_id,
                 "INVALID_SERVICE_NAME",
                 exc.message,
                 {"service_name": exc.service_name},
             )
         except PolkitAgentUnavailableError as exc:
             return error_response(
-                request.id,
+                request_id,
                 "AUTHENTICATION_REQUIRED",
                 exc.message,
                 {
@@ -73,7 +91,7 @@ class RequestDispatcher:
             )
         except AuthorizationDeniedError as exc:
             return error_response(
-                request.id,
+                request_id,
                 "AUTHORIZATION_DENIED",
                 exc.message,
                 {
@@ -83,14 +101,14 @@ class RequestDispatcher:
             )
         except AuthenticationRequiredError as exc:
             return error_response(
-                request.id,
+                request_id,
                 "AUTHENTICATION_REQUIRED",
                 exc.message,
                 exc.details,
             )
         except PermissionDeniedError as exc:
             return error_response(
-                request.id,
+                request_id,
                 "PERMISSION_DENIED",
                 exc.message,
                 {
@@ -100,36 +118,35 @@ class RequestDispatcher:
             )
         except ServiceOperationError as exc:
             return error_response(
-                request.id,
+                request_id,
                 "SERVICE_OPERATION_FAILED",
                 exc.message,
                 {"service_name": exc.service_name, "operation": exc.operation},
             )
         except SystemdConnectionError as exc:
             return error_response(
-                request.id,
+                request_id,
                 "SYSTEMD_CONNECTION_ERROR",
                 exc.message,
                 exc.details,
             )
         except ServiceDeckError as exc:
             return error_response(
-                request.id,
+                request_id,
                 "SERVICEDECK_ERROR",
                 exc.message,
                 getattr(exc, "details", {}),
             )
         except ValueError as exc:
             return error_response(
-                request.id,
+                request_id,
                 "INVALID_PARAMS",
                 str(exc),
                 {},
             )
         except Exception as exc:
-            logger.exception("[%d] Unexpected error dispatching '%s': %s", request.id, method, exc)
             return error_response(
-                request.id,
+                request_id,
                 "INTERNAL_ERROR",
                 f"An unexpected internal error occurred: {exc}",
                 {"error": str(exc)},
@@ -226,6 +243,54 @@ class RequestDispatcher:
             return {"healthy": healthy}
 
         raise ValueError(f"Unknown method '{method}'")
+
+    @staticmethod
+    def is_stream_method(method: str) -> bool:
+        """Return True if ``method`` opens a stream instead of returning one result."""
+        return method in STREAM_METHODS
+
+    def open_stream(self, method: str, params: dict[str, Any]) -> AsyncIterator[StreamItem]:
+        """Start a stream; yields ``(event, data)`` pairs, the first being ``("ready", ...)``.
+
+        Raising before the first item means the stream could not be opened; the caller
+        answers the request with :meth:`error_response_for` in that case.
+        """
+        if method == "stream.services":
+            return self._service_events(params.get("scope"))
+        if method == "stream.logs":
+            self._require_param("name", params)
+            return self._log_lines(
+                params["name"], int(params.get("lines", 200)), params.get("scope")
+            )
+        raise ValueError(f"Unknown stream method '{method}'")
+
+    async def _service_events(self, scope: str | None) -> AsyncIterator[StreamItem]:
+        events = self._manager.watch_services(scope=scope)
+        try:
+            async for event in events:
+                if event.kind == "changed" and event.service is not None:
+                    yield "service", dataclasses.asdict(event.service)
+                elif event.kind == "removed":
+                    yield "removed", {"name": event.name, "scope": event.scope}
+                else:
+                    yield event.kind, {"scope": event.scope}
+        finally:
+            await events.aclose()  # type: ignore[attr-defined]
+
+    async def _log_lines(
+        self, name: str, lines: int, scope: str | None
+    ) -> AsyncIterator[StreamItem]:
+        stream = self._manager.follow_service_logs(name=name, lines=lines, scope=scope)
+        try:
+            first = True
+            async for line in stream:
+                if first:
+                    first = False
+                    yield "ready", None
+                    continue
+                yield "log", {"line": line}
+        finally:
+            await stream.aclose()  # type: ignore[attr-defined]
 
     @staticmethod
     def _require_param(name: str, params: dict[str, Any]) -> None:

@@ -110,6 +110,12 @@ def main(argv: list[str] | None = None) -> int:
         help="ServiceDeck backend URL (default: http://127.0.0.1:8000)",
     )
 
+    # Service subcommands: list, status, start/stop/..., logs
+    from servicedeck.cli_services import COMMANDS as SERVICE_COMMANDS
+    from servicedeck.cli_services import add_service_parsers
+
+    add_service_parsers(subparsers)
+
     # Remote subcommand
     remote_parser = subparsers.add_parser(
         "remote",
@@ -155,6 +161,13 @@ def main(argv: list[str] | None = None) -> int:
     status_parser.add_argument("id", help="Device identifier to inspect")
 
     args, unknown = parser.parse_known_args(argv)
+
+    if args.subcommand in SERVICE_COMMANDS:
+        if unknown:
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+        from servicedeck.cli_services import run_service_command
+
+        return run_service_command(args)
 
     if args.subcommand == "remote":
         if args.remote_subcommand is None:

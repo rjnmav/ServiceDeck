@@ -3,8 +3,10 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import StreamingResponse
 
 from servicedeck.backend.api.dependencies import get_service_manager
+from servicedeck.backend.api.sse import log_lines_response
 from servicedeck.backend.core.security_logger import (
     log_authorization_denied,
     log_operation_attempt,
@@ -465,4 +467,32 @@ async def get_service_logs(
         logs=logs,
         scope=resolved_scope,
         lines=lines,
+    )
+
+
+@router.get(
+    "/{service_name}/logs/follow",
+    summary="Follow service logs",
+    description=(
+        "Server-Sent Events stream like `journalctl -f`: `ready`, then the last `lines` "
+        "entries and new ones as `log` events (`{line}`), and a final `end` or `error`."
+    ),
+    response_class=StreamingResponse,
+    responses={200: {"content": {"text/event-stream": {}}}},
+)
+async def follow_service_logs(
+    service_name: str,
+    service_manager: ServiceManagerDep,
+    lines: Annotated[
+        int, Query(ge=0, le=2000, description="Recent lines to send before following")
+    ] = 200,
+    scope: ScopeQuery = None,
+) -> StreamingResponse:
+    """Stream journal entries for a service as they are written."""
+    resolved_scope = service_manager.resolve_scope(scope)
+    clean_name = normalize_service_name(service_name)
+    return await log_lines_response(
+        service_manager.follow_service_logs(clean_name, lines=lines, scope=resolved_scope),
+        service=clean_name,
+        scope=resolved_scope,
     )

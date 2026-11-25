@@ -22,7 +22,7 @@ from servicedeck.backend.remote.bundle import (
     get_agent_payload,
     stage1_command,
 )
-from servicedeck.backend.remote.channel import drain_stderr, exchange_request
+from servicedeck.backend.remote.channel import AgentChannel, RemoteStream, drain_stderr
 from servicedeck.backend.remote.device_config import RemoteDevice
 from servicedeck.backend.remote.known_hosts import KnownHostsStore
 from servicedeck.backend.remote.privileged import PrivilegedAgent
@@ -60,7 +60,7 @@ class SSHTransport:
         self._process: asyncssh.SSHClientProcess | None = None
         self._hello: HelloMessage | None = None
         self._encoder = ProtocolEncoder()
-        self._lock = asyncio.Lock()
+        self._channel: AgentChannel | None = None
         self._launch_mode: str | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=_STDERR_TAIL_LINES)
@@ -75,6 +75,8 @@ class SSHTransport:
     def is_connected(self) -> bool:
         """Return True if both the SSH connection and remote agent process are active."""
         if self._conn is None or self._process is None:
+            return False
+        if self._channel is not None and self._channel.closed:
             return False
         return not self._process.is_closing()
 
@@ -302,6 +304,17 @@ class SSHTransport:
             },
         )
 
+    def _get_channel(self, request_id: int) -> AgentChannel:
+        """The multiplexing channel over the agent's stdio, created on first use."""
+        if not self.is_connected or self._process is None:
+            raise RemoteConnectionError(
+                f"Cannot send request {request_id}: connection to {self._device.hostname} is not open",
+                details={"request_id": request_id, "device_id": self._device.id},
+            )
+        if self._channel is None or self._channel.process is not self._process:
+            self._channel = AgentChannel(self._process, self._device.hostname, self._device.id)
+        return self._channel
+
     async def send_request(
         self,
         request: RequestMessage,
@@ -309,22 +322,26 @@ class SSHTransport:
     ) -> ResponseMessage:
         """Send a RequestMessage to the remote agent and await a correlating ResponseMessage.
 
-        Serializes all traffic across the single SSH stdio channel via an asyncio mutex
-        to prevent frame interleaving and concurrent StreamReader reads.
+        Requests are matched to responses by id, so concurrent calls and open streams
+        share the single SSH stdio channel. A failure tears the connection down.
         """
-        async with self._lock:
-            if not self.is_connected or self._process is None:
-                raise RemoteConnectionError(
-                    f"Cannot send request {request.id}: connection to {self._device.hostname} is not open",
-                    details={"request_id": request.id, "device_id": self._device.id},
-                )
-            try:
-                return await exchange_request(
-                    self._process, request, timeout, self._device.hostname
-                )
-            except Exception:
-                await self.disconnect()
-                raise
+        channel = self._get_channel(request.id)
+        try:
+            return await channel.request(request, timeout)
+        except Exception:
+            await self.disconnect()
+            raise
+
+    async def open_stream(
+        self, request: RequestMessage, timeout: float = 30.0
+    ) -> tuple[ResponseMessage, RemoteStream | None]:
+        """Open a ``stream.*`` request on the normal agent (see ``AgentChannel.open_stream``)."""
+        channel = self._get_channel(request.id)
+        try:
+            return await channel.open_stream(request, timeout)
+        except Exception:
+            await self.disconnect()
+            raise
 
     # --- Administrator (root) agent ---
 
@@ -370,6 +387,17 @@ class SSHTransport:
             )
         return await self._privileged.send_request(request, timeout=timeout)
 
+    async def open_privileged_stream(
+        self, request: RequestMessage, timeout: float = 30.0
+    ) -> tuple[ResponseMessage, RemoteStream | None]:
+        """Open a ``stream.*`` request on the root agent."""
+        if not self.is_elevated or self._privileged is None:
+            raise RemoteConnectionError(
+                f"No administrator session is open on {self._device.hostname}",
+                details={"device_id": self._device.id},
+            )
+        return await self._privileged.open_stream(request, timeout=timeout)
+
     async def drop_privileges(self) -> None:
         """Stop the root agent, if any. The normal agent keeps running."""
         agent, self._privileged = self._privileged, None
@@ -409,6 +437,10 @@ class SSHTransport:
             except (asyncio.CancelledError, Exception):
                 pass
         self._stderr_task = None
+
+        channel, self._channel = self._channel, None
+        if channel is not None:
+            await channel.close()
 
         self._process = None
         self._conn = None

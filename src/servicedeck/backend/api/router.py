@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from servicedeck.backend.api.routes import (
     daemon,
     devices,
+    events,
     health,
     remote,
     scope,
@@ -16,6 +17,7 @@ api_router = APIRouter(prefix="/api")
 api_router.include_router(health.router)
 api_router.include_router(scope.router)
 api_router.include_router(services.router)
+api_router.include_router(events.router)
 api_router.include_router(daemon.router)
 api_router.include_router(devices.router)
 api_router.include_router(remote.router)

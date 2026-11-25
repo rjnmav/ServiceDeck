@@ -8,7 +8,9 @@ from servicedeck.remote.exceptions import RemoteProtocolError
 from servicedeck.remote.models import (
     AuthChallengeMessage,
     AuthResponseMessage,
+    CancelMessage,
     ErrorDetail,
+    EventMessage,
     GoodbyeMessage,
     HelloMessage,
     ProtocolMessage,
@@ -49,6 +51,10 @@ def _parse_message(payload: bytes) -> ProtocolMessage:
         return AuthChallengeMessage(**data)
     if msg_type == "auth_response":
         return AuthResponseMessage(**data)
+    if msg_type == "event":
+        return EventMessage(**data)
+    if msg_type == "cancel":
+        return CancelMessage(**data)
     if msg_type == "goodbye":
         return GoodbyeMessage(**data)
 

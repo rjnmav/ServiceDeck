@@ -3,8 +3,10 @@
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
+from fastapi.responses import StreamingResponse
 
 from servicedeck.backend.api.dependencies import RemoteManagerDep
+from servicedeck.backend.api.sse import log_lines_response, service_events_response
 from servicedeck.backend.schemas.service import (
     CreateServiceRequest,
     CreateServiceResponse,
@@ -329,6 +331,53 @@ async def get_remote_logs(
         logs=logs,
         scope=scope or "default",
         lines=lines,
+    )
+
+
+@router.get(
+    "/services/{service_name}/logs/follow",
+    summary="Follow Remote Service Logs",
+    description=(
+        "Server-Sent Events stream like `journalctl -f` on the remote host (same events as "
+        "the local `/services/{name}/logs/follow`). System-scope logs are read as root while "
+        "the device has administrator access."
+    ),
+    response_class=StreamingResponse,
+    responses={200: {"content": {"text/event-stream": {}}}},
+)
+async def follow_remote_logs(
+    device_id: str,
+    service_name: str,
+    remote_manager: RemoteManagerDep,
+    lines: Annotated[int, Query(ge=0, le=2000, description="Recent lines to send first")] = 200,
+    scope: Annotated[str | None, Query(description="Scope ('user' or 'system')")] = None,
+) -> StreamingResponse:
+    return await log_lines_response(
+        remote_manager.follow_service_logs(
+            device_id=device_id, name=service_name, lines=lines, scope=scope
+        ),
+        service=service_name,
+        scope=scope,
+    )
+
+
+@router.get(
+    "/events",
+    summary="Stream Remote Service Changes",
+    description=(
+        "Server-Sent Events stream of live service changes on the remote host (same events "
+        "as the local `/events`), forwarded by the agent over the existing SSH channel."
+    ),
+    response_class=StreamingResponse,
+    responses={200: {"content": {"text/event-stream": {}}}},
+)
+async def stream_remote_events(
+    device_id: str,
+    remote_manager: RemoteManagerDep,
+    scope: Annotated[str | None, Query(description="Scope ('user' or 'system')")] = None,
+) -> StreamingResponse:
+    return await service_events_response(
+        remote_manager.watch_services(device_id=device_id, scope=scope)
     )
 
 

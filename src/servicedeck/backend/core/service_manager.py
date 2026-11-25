@@ -5,10 +5,12 @@ It must NOT import or know anything about FastAPI, HTTP, or web frameworks.
 """
 
 import logging
+from collections.abc import AsyncIterator
 
 from servicedeck.backend.infrastructure.dbus.systemd import SystemdAdapter
 from servicedeck.backend.models.service import (
     Service,
+    ServiceEvent,
     ServiceResourceUsage,
     normalize_service_name,
     validate_scope,
@@ -164,3 +166,18 @@ class ServiceManager:
         return await self._adapter.create_service(
             clean_name, content=content, scope=target_scope, overwrite=overwrite
         )
+
+    def watch_services(self, scope: str | None = None) -> AsyncIterator[ServiceEvent]:
+        """Stream live service changes for the resolved scope (first event: ``ready``)."""
+        target_scope = self.resolve_scope(scope)
+        logger.debug("[%s] Watching services for changes", target_scope)
+        return self._adapter.watch_services(scope=target_scope)
+
+    def follow_service_logs(
+        self, name: str, lines: int = 200, scope: str | None = None
+    ) -> AsyncIterator[str]:
+        """Stream journal lines for a service; the first item is the ``""`` ready marker."""
+        target_scope = self.resolve_scope(scope)
+        clean_name = normalize_service_name(name)
+        logger.debug("[%s] Following logs for '%s'", target_scope, clean_name)
+        return self._adapter.follow_service_logs(clean_name, lines=lines, scope=target_scope)

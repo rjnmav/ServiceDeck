@@ -79,6 +79,25 @@ class Service:
         return self.unit_file_state == "enabled"
 
 
+ServiceEventKind = Literal["ready", "changed", "removed", "resync"]
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceEvent:
+    """A live change to the service inventory of one scope.
+
+    ``ready``: the watch is set up; later changes will be reported.
+    ``changed``: ``service`` holds the unit's new state (new units arrive this way too).
+    ``removed``: the unit named ``name`` no longer exists.
+    ``resync``: something changed in bulk (daemon-reload, enable/disable); re-list.
+    """
+
+    kind: ServiceEventKind
+    scope: str = "user"
+    name: str | None = None
+    service: Service | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceResourceUsage:
     """Resource consumption metrics for an active systemd service unit."""
