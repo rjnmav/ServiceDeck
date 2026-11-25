@@ -76,3 +76,49 @@ async def test_servicedeck_remote_agent_subprocess() -> None:
         if process.returncode is None:
             process.terminate()
             await process.wait()
+
+
+@pytest.mark.asyncio
+async def test_servicedeck_remote_agent_without_user_dbus() -> None:
+    """Agent should still start and serve system scope when user D-Bus is unavailable."""
+    env = os.environ.copy()
+    env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+    env.pop("DISPLAY", None)
+    python_exe = sys.executable
+
+    process = await asyncio.create_subprocess_exec(
+        python_exe,
+        "-m",
+        "servicedeck.remote_agent",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+
+    assert process.stdout is not None
+    assert process.stdin is not None
+
+    try:
+        hello = await asyncio.wait_for(read_message(process.stdout), timeout=5.0)
+        assert isinstance(hello, HelloMessage)
+
+        req = RequestMessage(id=1, method="service.list", params={"scope": "system"})
+        await write_message(process.stdin, req)
+
+        resp = await asyncio.wait_for(read_message(process.stdout), timeout=5.0)
+        assert isinstance(resp, ResponseMessage)
+        assert resp.id == 1
+        assert resp.success is True
+        assert isinstance(resp.result, list)
+
+        await write_message(process.stdin, GoodbyeMessage(reason="test_done"))
+        process.stdin.close()
+        await process.stdin.wait_closed()
+
+        return_code = await asyncio.wait_for(process.wait(), timeout=5.0)
+        assert return_code == 0
+    finally:
+        if process.returncode is None:
+            process.terminate()
+            await process.wait()
