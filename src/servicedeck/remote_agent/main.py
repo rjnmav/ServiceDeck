@@ -132,7 +132,12 @@ async def async_main(log_level: int) -> int:
 
     try:
         logger.debug("Connecting to systemd D-Bus...")
-        await connection_manager.connect()
+        startup_scopes = ("system",) if os.getuid() == 0 else ("system", "user")
+        for scope in startup_scopes:
+            try:
+                await connection_manager.connect(scope)
+            except Exception as exc:
+                logger.warning("Failed to connect to %s D-Bus at startup: %s", scope, exc)
 
         server_task = asyncio.create_task(server.run())
         stop_task = asyncio.create_task(stop_event.wait())
