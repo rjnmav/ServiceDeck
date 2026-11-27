@@ -2,19 +2,22 @@
 
 from typing import Any
 
-from PySide6.QtCore import QFile, QItemSelection, QPoint, Qt, QTimer
-from PySide6.QtGui import QColor, QIcon, QKeySequence
+from PySide6.QtCore import QEvent, QItemSelection, QPoint, Qt, QTimer
+from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QMainWindow,
     QMenu,
     QMenuBar,
     QMessageBox,
-    QPushButton,
+    QSplitter,
     QTableView,
+    QVBoxLayout,
+    QWidget,
 )
 
 from servicedeck.api_client import ServiceDeckClient
@@ -28,6 +31,7 @@ from servicedeck.api_client.models.service import (
 from servicedeck.gui.models.service_filter_model import ServiceFilterModel
 from servicedeck.gui.models.service_model import ServiceTableModel
 from servicedeck.gui.resources.icon_helper import IconHelper
+from servicedeck.gui.resources.theme import build_qpalette, get_palette, load_stylesheet
 from servicedeck.gui.views.dialogs.add_remote_device_dialog import AddRemoteDeviceDialog
 from servicedeck.gui.views.dialogs.create_service_dialog import CreateServiceDialog
 from servicedeck.gui.views.dialogs.manage_remote_devices_dialog import (
@@ -36,10 +40,13 @@ from servicedeck.gui.views.dialogs.manage_remote_devices_dialog import (
 from servicedeck.gui.views.dialogs.preferences_dialog import PreferencesDialog
 from servicedeck.gui.views.dialogs.remote_onboarding import (
     MAX_ONBOARDING_STEPS,
+    connect_with_onboarding,
     handle_elevation_error,
     handle_onboarding_error,
     needs_elevation,
 )
+from servicedeck.gui.views.host_sidebar import HostSidebar
+from servicedeck.gui.views.service_delegate import ServiceItemDelegate
 from servicedeck.gui.views.service_detail_panel import ServiceDetailPanel
 from servicedeck.gui.views.service_toolbar import ServiceToolbar
 from servicedeck.gui.workers.service_worker import run_async_task
@@ -50,7 +57,7 @@ LIVE_RETRY_DELAYS = (2, 5, 10, 30, 60)
 
 
 class MainWindow(QMainWindow):
-    """Main window faithfully recreating the original ServiceDeck C++/Qt user interface."""
+    """Master-detail main window with Host/Scope rail, filterable list, and right inspector."""
 
     def __init__(self, client: ServiceDeckClient, parent: Any = None) -> None:
         super().__init__(parent)
@@ -80,16 +87,16 @@ class MainWindow(QMainWindow):
         self._resync_timer.setInterval(300)
         self._resync_timer.timeout.connect(self._refresh_in_place)
 
-        self.setWindowTitle("ServiceDeck — Systemd Service Manager (Local)")
-        self.setMinimumSize(900, 500)
+        self.setWindowTitle("Local System")
+        self.setMinimumSize(980, 560)
         self.setWindowIcon(QIcon(":/assets/servicedeck.svg"))
 
         self._setup_menu_bar()
         self._setup_ui()
         self._connect_signals()
+        self._setup_shortcuts()
         self.apply_theme(self._current_theme)
 
-        # Initial scope and service list fetch
         self._initial_load()
 
     def _setup_menu_bar(self) -> None:
@@ -97,19 +104,16 @@ class MainWindow(QMainWindow):
         menubar.setNativeMenuBar(False)
         self.setMenuBar(menubar)
 
-        # File Menu
         file_menu = menubar.addMenu("&File")
         exit_action = file_menu.addAction("E&xit")
         app = QApplication.instance()
         if app is not None:
             exit_action.triggered.connect(app.quit)
 
-        # Edit Menu
         edit_menu = menubar.addMenu("&Edit")
         prefs_action = edit_menu.addAction("&Preferences")
         prefs_action.triggered.connect(self._on_preferences_clicked)
 
-        # Help Menu
         help_menu = menubar.addMenu("&Help")
         about_action = help_menu.addAction("&About")
         about_action.triggered.connect(self._on_about_clicked)
@@ -118,50 +122,80 @@ class MainWindow(QMainWindow):
         if app is not None:
             about_qt_action.triggered.connect(app.aboutQt)
 
-        # Hidden by default, toggled via Alt key
+        # Hidden by default, toggled via Alt key; Preferences & Theme live in the sidebar.
         menubar.hide()
 
     def _setup_ui(self) -> None:
-        # Toolbar
-        self._toolbar = ServiceToolbar(self, is_dark=(self._current_theme == "dark"))
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._toolbar)
+        central = QWidget(self)
+        root_layout = QHBoxLayout(central)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        # ─── Left Host & Scope Rail ───
+        self._sidebar = HostSidebar(self, theme=self._current_theme)
+        root_layout.addWidget(self._sidebar)
+
+        # ─── Workspace + Right Inspector Splitter ───
+        self._splitter = QSplitter(Qt.Orientation.Horizontal, central)
+        self._splitter.setChildrenCollapsible(False)
+
+        workspace = QWidget(self._splitter)
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.setSpacing(0)
+
+        self._toolbar = ServiceToolbar(workspace, is_dark=(self._current_theme == "dark"))
+        workspace_layout.addWidget(self._toolbar)
 
         # Service Table & Models
         self._table_model = ServiceTableModel(self)
         self._filter_model = ServiceFilterModel(self)
         self._filter_model.setSourceModel(self._table_model)
 
-        self._table_view = QTableView(self)
+        self._table_view = QTableView(workspace)
         self._table_view.setObjectName("serviceTable")
         self._table_view.setModel(self._filter_model)
+        self._delegate = ServiceItemDelegate(self._table_view, theme=self._current_theme)
+        self._table_view.setItemDelegate(self._delegate)
+        self._table_view.setMouseTracking(True)
         self._table_view.setSortingEnabled(True)
         self._table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._table_view.setAlternatingRowColors(True)
         self._table_view.setShowGrid(False)
         self._table_view.verticalHeader().setVisible(False)
+        self._table_view.verticalHeader().setDefaultSectionSize(ServiceItemDelegate.ROW_HEIGHT)
 
         h_header = self._table_view.horizontalHeader()
-        h_header.setStretchLastSection(True)
-        h_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        h_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        h_header.setStretchLastSection(False)
+        h_header.setSectionResizeMode(ServiceTableModel.COL_SERVICE, QHeaderView.ResizeMode.Stretch)
+        h_header.setSectionResizeMode(ServiceTableModel.COL_STATUS, QHeaderView.ResizeMode.Fixed)
+        h_header.setSectionResizeMode(ServiceTableModel.COL_STARTUP, QHeaderView.ResizeMode.Fixed)
         h_header.setHighlightSections(False)
 
+        self._table_view.setColumnWidth(ServiceTableModel.COL_STATUS, 165)
+        self._table_view.setColumnWidth(ServiceTableModel.COL_STARTUP, 145)
         self._table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._table_view.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        self._table_view.sortByColumn(ServiceTableModel.COL_SERVICE, Qt.SortOrder.AscendingOrder)
         self._table_view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._table_view.entered.connect(self._on_table_row_entered)
+        self._table_view.viewport().installEventFilter(self)
 
-        self._table_view.setColumnWidth(0, 350)
-        self._table_view.setColumnWidth(2, 150)
-        self._table_view.setColumnWidth(3, 150)
-        self._table_view.setColumnWidth(4, 150)
+        workspace_layout.addWidget(self._table_view, 1)
+        self._splitter.addWidget(workspace)
 
-        self.setCentralWidget(self._table_view)
-
-        # Bottom Detail Panel Dock
-        self._detail_panel = ServiceDetailPanel(self, client=self.client)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._detail_panel)
+        # Right-Side Inspector Drawer
+        self._detail_panel = ServiceDetailPanel(
+            self._splitter, client=self.client, theme=self._current_theme
+        )
+        self._splitter.addWidget(self._detail_panel)
+        self._splitter.setStretchFactor(0, 3)
+        self._splitter.setStretchFactor(1, 2)
+        self._splitter.setSizes([720, 440])
         self._detail_panel.hide()
+
+        root_layout.addWidget(self._splitter, 1)
+        self.setCentralWidget(central)
 
         # Status Bar
         status_bar = self.statusBar()
@@ -170,65 +204,54 @@ class MainWindow(QMainWindow):
             self._status_label.setObjectName("statusMessage")
             self._count_label = QLabel("0 services")
             self._count_label.setObjectName("serviceCount")
-
-            self._admin_button = QPushButton("Admin  \u2715")
-            self._admin_button.setObjectName("adminSessionButton")
-            self._admin_button.setFlat(True)
-            self._admin_button.setToolTip(
-                "System services on this host are managed with administrator access.\n"
-                "Click to drop administrator access."
-            )
-            self._admin_button.clicked.connect(self._on_drop_admin_clicked)
-            self._admin_button.hide()
-
-            self._live_label = QLabel()
-            self._live_label.setObjectName("liveIndicator")
-
             status_bar.addWidget(self._status_label, 1)
-            status_bar.addPermanentWidget(self._admin_button)
-            status_bar.addPermanentWidget(self._live_label)
             status_bar.addPermanentWidget(self._count_label)
         else:
             self._status_label = QLabel()
             self._count_label = QLabel()
-            self._admin_button = QPushButton()
-            self._admin_button.hide()
-            self._live_label = QLabel()
+
         self._set_live_indicator(False, "Live updates are not connected yet.")
 
-    def _connect_signals(self) -> None:
-        # Toolbar actions
-        self._toolbar.start_action.triggered.connect(self._on_start_clicked)
-        self._toolbar.stop_action.triggered.connect(self._on_stop_clicked)
-        self._toolbar.restart_action.triggered.connect(self._on_restart_clicked)
-        self._toolbar.enable_action.triggered.connect(self._on_enable_clicked)
-        self._toolbar.disable_action.triggered.connect(self._on_disable_clicked)
-        self._toolbar.mask_action.triggered.connect(self._on_mask_clicked)
-        self._toolbar.unmask_action.triggered.connect(self._on_unmask_clicked)
-        self._toolbar.reload_action.triggered.connect(lambda: self._on_reload_daemon_clicked())
+    def _setup_shortcuts(self) -> None:
+        search_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        search_shortcut.activated.connect(self._toolbar.focus_search)
 
         self._toolbar.refresh_action.setShortcut(QKeySequence.StandardKey.Refresh)
-        self._toolbar.refresh_action.triggered.connect(self.request_service_list)
-        self._toolbar.create_action.triggered.connect(self._on_create_clicked)
+        refresh_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F5), self)
+        refresh_shortcut.activated.connect(self.request_service_list)
 
-        # Search & Filter
+        esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        esc_shortcut.activated.connect(self._on_escape_pressed)
+
+    def _connect_signals(self) -> None:
+        # Sidebar navigation
+        self._sidebar.target_host_changed.connect(self._on_target_host_changed)
+        self._sidebar.scope_toggled.connect(self._on_system_scope_toggled)
+        self._sidebar.add_host_requested.connect(self._on_add_host_requested)
+        self._sidebar.connect_host_requested.connect(self._on_connect_host_requested)
+        self._sidebar.disconnect_host_requested.connect(self._on_disconnect_host_requested)
+        self._sidebar.remove_host_requested.connect(self._on_remove_host_requested)
+        self._sidebar.drop_admin_requested.connect(self._on_drop_admin_clicked)
+        self._sidebar.reload_daemon_requested.connect(lambda: self._on_reload_daemon_clicked())
+        self._sidebar.theme_toggle_requested.connect(self._on_toggle_theme)
+        self._sidebar.preferences_requested.connect(self._on_preferences_clicked)
+
+        # Workspace Header
+        self._toolbar.refresh_requested.connect(self.request_service_list)
+        self._toolbar.create_requested.connect(self._on_create_clicked)
         self._toolbar.search_text_changed.connect(self._filter_model.set_name_filter)
         self._toolbar.active_state_filter_changed.connect(
             self._filter_model.set_active_state_filter
         )
-        self._toolbar.system_mode_toggled.connect(self._on_system_scope_toggled)
 
-        # Host selection
-        self._toolbar.target_host_changed.connect(self._on_target_host_changed)
-        self._toolbar.add_host_requested.connect(self._on_add_host_requested)
-        self._toolbar.manage_hosts_requested.connect(self._on_manage_hosts_requested)
+        # Right Inspector Drawer
+        self._detail_panel.action_requested.connect(self._on_inspector_action)
+        self._detail_panel.close_requested.connect(self._on_inspector_closed)
 
-        # Table Selection
+        # Table Selection & Context Menu
         sel_model = self._table_view.selectionModel()
         if sel_model is not None:
             sel_model.selectionChanged.connect(self._on_selection_changed)
-
-        # Context menu
         self._table_view.customContextMenuRequested.connect(self._show_context_menu)
 
     def _initial_load(self) -> None:
@@ -247,10 +270,9 @@ class MainWindow(QMainWindow):
             active_scope, services, devices = result
             self._current_scope = active_scope
             self._devices = devices
-            self._toolbar.system_toggle.blockSignals(True)
-            self._toolbar.system_toggle.setChecked(active_scope == "system")
-            self._toolbar.system_toggle.blockSignals(False)
-            self._toolbar.set_hosts(devices, self._current_device_id)
+            self._sidebar.set_scope(active_scope)
+            self._sidebar.set_hosts(devices, self._current_device_id)
+            self._update_context_header()
             self._populate_table(services)
             self.set_status(f"Connected to backend ({active_scope} scope)", success=True)
             self._ensure_live_updates()
@@ -314,26 +336,46 @@ class MainWindow(QMainWindow):
                 return f"{dev.username}@{dev.hostname}" if dev.username else dev.hostname
         return device_id
 
+    def _update_counts(self) -> None:
+        counts = self._table_model.state_counts()
+        self._toolbar.update_counts(counts)
+        total = counts.get("all", 0)
+        self._count_label.setText(f"{total} service{'s' if total != 1 else ''}")
+
+    def _update_context_header(self) -> None:
+        self._toolbar.set_context(self._get_host_display_name(), self._current_scope)
+        self._update_window_title()
+
     def _populate_table(self, services: list[Service]) -> None:
         self._table_model.set_services(services)
-        self._count_label.setText(f"{len(services)} services")
+        self._update_counts()
         self._detail_panel.clear()
-        self._toolbar.set_actions_enabled(False)
+        self._detail_panel.hide()
 
     def _on_selection_changed(self, selected: QItemSelection, deselected: QItemSelection) -> None:
         indexes = self._table_view.selectionModel().selectedRows()
         if not indexes:
-            self._toolbar.set_actions_enabled(False)
             self._detail_panel.clear()
+            self._detail_panel.hide()
             return
 
-        self._toolbar.set_actions_enabled(True)
         source_index = self._filter_model.mapToSource(indexes[0])
         service = self._table_model.service_at(source_index.row())
         if service:
             self._detail_panel.show_service_details(
                 service, scope=self._current_scope, device_id=self._current_device_id
             )
+
+    def _on_inspector_closed(self) -> None:
+        self._detail_panel.clear()
+        sel_model = self._table_view.selectionModel()
+        if sel_model is not None:
+            sel_model.clearSelection()
+
+    def _on_escape_pressed(self) -> None:
+        if self._detail_panel.isVisible():
+            self._detail_panel.hide()
+            self._on_inspector_closed()
 
     def _selected_service_name(self) -> str | None:
         indexes = self._table_view.selectionModel().selectedRows()
@@ -346,7 +388,7 @@ class MainWindow(QMainWindow):
     def _confirm_action(self, action: str, service_name: str) -> bool:
         reply = QMessageBox.warning(
             self,
-            f"Confirm {action}",
+            f"Confirm {action.capitalize()}",
             f"Are you sure you want to <b>{action}</b> the service:<br><br><b>{service_name}</b>?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -368,14 +410,14 @@ class MainWindow(QMainWindow):
 
         def on_start() -> None:
             self._is_busy = True
-            self._toolbar.set_actions_enabled(False)
+            self._detail_panel.set_actions_enabled(False)
             self.set_status(f"{op_name.capitalize()}ing '{name}'...")
 
         def on_success(res: ServiceOperationResult) -> None:
             self._is_busy = False
             msg = res.message or f"Service '{name}' {op_name}ed successfully."
             self.set_status(msg, success=True)
-            self._toolbar.set_actions_enabled(self._selected_service_name() is not None)
+            self._detail_panel.set_actions_enabled(True)
             self._refresh_after_change()
 
         def on_error(msg: str, exc: Any) -> None:
@@ -383,7 +425,7 @@ class MainWindow(QMainWindow):
             if device_id is not None and not _elevated and needs_elevation(exc):
                 self._elevated_devices.discard(device_id)
                 self._update_admin_indicator()
-                self._toolbar.set_actions_enabled(True)
+                self._detail_panel.set_actions_enabled(True)
                 self._request_elevation(
                     device_id,
                     exc,
@@ -402,9 +444,24 @@ class MainWindow(QMainWindow):
                 self.set_status(f"Permission denied {op_name}ing '{name}': {msg}", success=False)
             else:
                 self.set_status(f"Error {op_name}ing '{name}': {msg}", success=False)
-            self._toolbar.set_actions_enabled(True)
+            self._detail_panel.set_actions_enabled(True)
 
         run_async_task(task, on_start=on_start, on_success=on_success, on_error=on_error)
+
+    def _on_inspector_action(self, action: str) -> None:
+        handlers = {
+            "start": self._on_start_clicked,
+            "stop": self._on_stop_clicked,
+            "restart": self._on_restart_clicked,
+            "enable": self._on_enable_clicked,
+            "disable": self._on_disable_clicked,
+            "reload": self._on_reload_clicked,
+            "mask": self._on_mask_clicked,
+            "unmask": self._on_unmask_clicked,
+        }
+        handler = handlers.get(action)
+        if handler is not None:
+            handler()
 
     def _on_start_clicked(self) -> None:
         self._execute_service_op("start", self.client.start_service)
@@ -489,13 +546,11 @@ class MainWindow(QMainWindow):
         if new_scope == self._current_scope:
             return
         if self._is_busy:
-            # Revert checkbox state if another operation is already in progress
-            self._toolbar.system_toggle.blockSignals(True)
-            self._toolbar.system_toggle.setChecked(self._current_scope == "system")
-            self._toolbar.system_toggle.blockSignals(False)
+            self._sidebar.set_scope(self._current_scope)
             return
 
         self._detail_panel.clear()
+        self._detail_panel.hide()
         if self._table_view.selectionModel():
             self._table_view.selectionModel().clearSelection()
 
@@ -512,14 +567,16 @@ class MainWindow(QMainWindow):
 
         def on_start() -> None:
             self._is_busy = True
-            self._toolbar.system_toggle.setEnabled(False)
+            self._sidebar.set_scope_enabled(False)
             self.set_status(f"Switching to {new_scope} scope...")
 
         def on_success(result: tuple[str, list[Service]]) -> None:
             self._is_busy = False
-            self._toolbar.system_toggle.setEnabled(True)
+            self._sidebar.set_scope_enabled(True)
             active_scope, services = result
             self._current_scope = active_scope
+            self._sidebar.set_scope(active_scope)
+            self._update_context_header()
             self._populate_table(services)
             self.set_status(
                 f"Switched to {active_scope} scope ({len(services)} services)", success=True
@@ -528,16 +585,17 @@ class MainWindow(QMainWindow):
 
         def on_error(msg: str, exc: Any) -> None:
             self._is_busy = False
-            self._toolbar.system_toggle.setEnabled(True)
-            # Revert checkbox state
-            self._toolbar.system_toggle.blockSignals(True)
-            self._toolbar.system_toggle.setChecked(self._current_scope == "system")
-            self._toolbar.system_toggle.blockSignals(False)
+            self._sidebar.set_scope_enabled(True)
+            self._sidebar.set_scope(self._current_scope)
             self.set_status(f"Failed to switch scope: {msg}", success=False)
 
         run_async_task(task, on_start=on_start, on_success=on_success, on_error=on_error)
 
     # --- Live updates ---
+
+    @property
+    def _live_label(self) -> QLabel:
+        return self._toolbar.live_label
 
     @property
     def live_updates_connected(self) -> bool:
@@ -576,11 +634,7 @@ class MainWindow(QMainWindow):
 
     def _set_live_indicator(self, connected: bool, tooltip: str) -> None:
         self._live_connected = connected
-        self._live_label.setText("\u25cf Live" if connected else "\u25cb Live")
-        self._live_label.setStyleSheet(
-            "color: #4CAF50; font-weight: 500;" if connected else "color: #9E9E9E;"
-        )
-        self._live_label.setToolTip(tooltip)
+        self._toolbar.set_live_status(connected, tooltip)
 
     def _on_live_event(self, token: int, event: ServiceEvent) -> None:
         if not self._is_current_live_worker(token):
@@ -590,7 +644,6 @@ class MainWindow(QMainWindow):
             self._set_live_indicator(
                 True, "Live updates on: the list follows changes as systemd reports them."
             )
-            # Changes between the last list and the subscription would be missed otherwise.
             self._resync_timer.start()
         elif event.kind == "resync":
             self._resync_timer.start()
@@ -598,14 +651,13 @@ class MainWindow(QMainWindow):
             self._apply_live_change(event.service)
         elif event.kind == "removed" and event.name:
             self._table_model.remove_service(event.name)
-            self._count_label.setText(f"{self._table_model.rowCount()} services")
+            self._update_counts()
 
     def _apply_live_change(self, service: Service) -> None:
         previous, current = self._table_model.apply_service_change(service)
-        if previous is None:
-            self._count_label.setText(f"{self._table_model.rowCount()} services")
+        self._update_counts()
         if current.is_failed and (previous is None or not previous.is_failed):
-            self.set_status(f"\u26a0 {current.name} failed ({current.sub_state})", success=False)
+            self.set_status(f"Alert: {current.name} failed ({current.sub_state})", success=False)
         if self._selected_service_name() == current.name:
             self._detail_panel.update_service_state(current)
 
@@ -643,7 +695,7 @@ class MainWindow(QMainWindow):
             if (device_id, scope) != (self._current_device_id, self._current_scope):
                 return
             self._table_model.merge_services(services)
-            self._count_label.setText(f"{self._table_model.rowCount()} services")
+            self._update_counts()
             name = self._selected_service_name()
             service = self._table_model.service_by_name(name) if name else None
             if service is not None:
@@ -674,12 +726,8 @@ class MainWindow(QMainWindow):
         return f"Host ({self._current_device_id})"
 
     def _update_window_title(self) -> None:
-        """Update window title to reflect active host target."""
-        if self._current_device_id is None:
-            self.setWindowTitle("ServiceDeck — Systemd Service Manager (Local)")
-        else:
-            host_name = self._get_host_display_name()
-            self.setWindowTitle(f"ServiceDeck — Systemd Service Manager [{host_name}]")
+        """Update window title cleanly without duplicating applicationDisplayName."""
+        self.setWindowTitle(self._get_host_display_name())
 
     def _request_elevation(self, device_id: str, exc: Any, *, retry: Any) -> None:
         """Get administrator access on ``device_id`` (asking for sudo), then ``retry``."""
@@ -709,7 +757,9 @@ class MainWindow(QMainWindow):
 
     def _update_admin_indicator(self) -> None:
         device_id = self._current_device_id
-        self._admin_button.setVisible(device_id is not None and device_id in self._elevated_devices)
+        self._sidebar.admin_button.setVisible(
+            device_id is not None and device_id in self._elevated_devices
+        )
 
     def _on_drop_admin_clicked(self) -> None:
         device_id = self._current_device_id
@@ -737,8 +787,9 @@ class MainWindow(QMainWindow):
         self._live_retry_timer.stop()
         self._live_failures = 0
         self._update_admin_indicator()
-        self._update_window_title()
+        self._update_context_header()
         self._detail_panel.clear()
+        self._detail_panel.hide()
         self.request_service_list()
 
     def _on_add_host_requested(self) -> None:
@@ -748,6 +799,68 @@ class MainWindow(QMainWindow):
             new_id = dlg.created_device.id if dlg.created_device else None
             self._refresh_hosts_list(switch_to_id=new_id)
 
+    def _on_connect_host_requested(self, device_id: str) -> None:
+        """Connect to a remote host directly from the sidebar host menu."""
+
+        def on_success(_info: Any) -> None:
+            self.set_status(f"Connected to {self._device_target(device_id)}.", success=True)
+            self._refresh_hosts_list(switch_to_id=device_id)
+
+        def on_error(msg: str, _exc: Any) -> None:
+            self.set_status(f"Failed to connect: {msg}", success=False)
+            self._refresh_hosts_list()
+
+        connect_with_onboarding(
+            self,
+            self.client,
+            device_id,
+            target=self._device_target(device_id),
+            on_success=on_success,
+            on_error=on_error,
+        )
+
+    def _on_disconnect_host_requested(self, device_id: str) -> None:
+        """Disconnect a remote host directly from the sidebar host menu."""
+
+        def on_success(_res: Any = None) -> None:
+            self.set_status("Disconnected remote host.", success=True)
+            self._refresh_hosts_list()
+
+        run_async_task(
+            self.client.disconnect_device,
+            device_id,
+            on_success=on_success,
+            on_error=lambda msg, _exc: self.set_status(
+                f"Failed to disconnect host: {msg}", success=False
+            ),
+        )
+
+    def _on_remove_host_requested(self, device_id: str) -> None:
+        """Confirm and remove a remote host directly from the sidebar host menu."""
+        reply = QMessageBox.question(
+            self,
+            "Remove Remote Host",
+            f"Remove remote host <b>{device_id}</b> from ServiceDeck?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        def on_success(_res: Any = None) -> None:
+            self.set_status(f"Removed host '{device_id}'.", success=True)
+            next_id = None if self._current_device_id == device_id else self._current_device_id
+            self._refresh_hosts_list(switch_to_id=next_id)
+
+        run_async_task(
+            self.client.remove_device,
+            device_id,
+            on_success=on_success,
+            on_error=lambda msg, _exc: self.set_status(
+                f"Failed to remove host: {msg}", success=False
+            ),
+        )
+
     def _on_manage_hosts_requested(self) -> None:
         """Show Manage Remote Hosts dialog and handle switch or update."""
         dlg = ManageRemoteDevicesDialog(self, client=self.client)
@@ -756,7 +869,7 @@ class MainWindow(QMainWindow):
         self._refresh_hosts_list(switch_to_id=target_id)
 
     def _refresh_hosts_list(self, switch_to_id: str | None = None) -> None:
-        """Reload remote devices list from backend and update toolbar."""
+        """Reload remote devices list from backend and update sidebar."""
 
         def task() -> list[RemoteDevice]:
             return self.client.list_devices()
@@ -764,16 +877,15 @@ class MainWindow(QMainWindow):
         def on_success(devices: list[RemoteDevice]) -> None:
             self._devices = devices
             target_id = switch_to_id if switch_to_id is not None else self._current_device_id
-            if target_id is not None:
-                exists = any(d.id == target_id for d in devices)
-                if not exists:
-                    target_id = None
+            if target_id is not None and not any(d.id == target_id for d in devices):
+                target_id = None
 
             self._current_device_id = target_id
             self._update_admin_indicator()
-            self._update_window_title()
-            self._toolbar.set_hosts(devices, self._current_device_id)
+            self._update_context_header()
+            self._sidebar.set_hosts(devices, self._current_device_id)
             self._detail_panel.clear()
+            self._detail_panel.hide()
             self.request_service_list()
 
         def on_error(msg: str, exc: Any) -> None:
@@ -787,44 +899,45 @@ class MainWindow(QMainWindow):
             return
 
         self._table_view.selectRow(index.row())
-
-        is_dark = self._current_theme == "dark"
-        neutral_color = QColor("#e5e9f0") if is_dark else QColor("#2d3748")
-        success_color = QColor("#81C784") if is_dark else QColor("#2E7D32")
-        danger_color = QColor("#E57373") if is_dark else QColor("#C62828")
+        palette = get_palette(self._current_theme)
 
         menu = QMenu(self)
         menu.setObjectName("contextMenu")
 
         menu.addAction(
-            IconHelper.tinted_icon("media-playback-start", success_color),
+            IconHelper.svg_icon("play", palette.success_text),
             "Start",
             self._on_start_clicked,
         )
         menu.addAction(
-            IconHelper.tinted_icon("media-playback-stop", danger_color),
+            IconHelper.svg_icon("stop", palette.danger_text),
             "Stop",
             self._on_stop_clicked,
         )
         menu.addAction(
-            IconHelper.tinted_icon("view-refresh", neutral_color),
+            IconHelper.svg_icon("restart", palette.text_primary),
             "Restart",
             self._on_restart_clicked,
         )
         menu.addSeparator()
         menu.addAction(
-            IconHelper.tinted_icon("emblem-default", success_color),
+            IconHelper.svg_icon("check", palette.success_text),
             "Enable",
             self._on_enable_clicked,
         )
+        menu.addAction(
+            IconHelper.svg_icon("ban", palette.danger_text),
+            "Disable",
+            self._on_disable_clicked,
+        )
         menu.addSeparator()
         menu.addAction(
-            IconHelper.tinted_icon("action-mask", danger_color),
+            IconHelper.svg_icon("lock", palette.masked_text),
             "Mask",
             self._on_mask_clicked,
         )
         menu.addAction(
-            IconHelper.tinted_icon("action-unmask", success_color),
+            IconHelper.svg_icon("unlock", palette.success_text),
             "Unmask",
             self._on_unmask_clicked,
         )
@@ -834,25 +947,55 @@ class MainWindow(QMainWindow):
 
     def set_status(self, message: str, success: bool | None = None) -> None:
         """Update status bar label and styling."""
+        palette = get_palette(self._current_theme)
         self._status_label.setText(message)
         if success is True:
-            self._status_label.setStyleSheet("color: #4CAF50; font-weight: 500;")
+            self._status_label.setStyleSheet(f"color: {palette.success_text}; font-weight: 600;")
         elif success is False:
-            self._status_label.setStyleSheet("color: #F44336; font-weight: 500;")
+            self._status_label.setStyleSheet(f"color: {palette.danger_text}; font-weight: 600;")
         else:
             self._status_label.setStyleSheet("")
 
-    def apply_theme(self, theme: str) -> None:
-        """Apply dark or light theme stylesheet and refresh icons."""
-        self._current_theme = theme
-        qss_path = f":/styles/{theme}_theme.qss"
-        file = QFile(qss_path)
-        if file.open(QFile.OpenModeFlag.ReadOnly | QFile.OpenModeFlag.Text):
-            stylesheet = bytes(file.readAll()).decode("utf-8")
-            self.setStyleSheet(stylesheet)
-            file.close()
+    def _on_toggle_theme(self) -> None:
+        next_theme = "light" if self._current_theme == "dark" else "dark"
+        self.apply_theme(next_theme)
 
+    def apply_theme(self, theme: str) -> None:
+        """Apply dark or light theme palette, stylesheet, icons, and delegates."""
+        self._current_theme = theme
+        qpalette = build_qpalette(theme)
+        app = QApplication.instance()
+        if app is not None:
+            app.setPalette(qpalette)
+        self.setPalette(qpalette)
+
+        stylesheet = load_stylesheet(theme)
+        if stylesheet:
+            if app is not None:
+                app.setStyleSheet(stylesheet)
+                self.setStyleSheet("")
+            else:
+                self.setStyleSheet(stylesheet)
+
+        self._sidebar.refresh_theme(theme)
         self._toolbar.refresh_icons(is_dark=(theme == "dark"))
+        self._detail_panel.refresh_theme(theme)
+        self._delegate.set_theme(theme)
+        self._set_live_indicator(
+            self._live_connected,
+            self._toolbar.live_label.toolTip(),
+        )
+        self._table_view.viewport().update()
+
+    def _on_table_row_entered(self, index: Any) -> None:
+        self._delegate.set_hovered_row(index.row() if index.isValid() else -1)
+        self._table_view.viewport().update()
+
+    def eventFilter(self, obj: Any, event: Any) -> bool:
+        if obj is self._table_view.viewport() and event.type() == QEvent.Type.Leave:
+            self._delegate.set_hovered_row(-1)
+            self._table_view.viewport().update()
+        return super().eventFilter(obj, event)
 
     def _on_preferences_clicked(self) -> None:
         dlg = PreferencesDialog(
@@ -877,12 +1020,11 @@ class MainWindow(QMainWindow):
             "<b>ServiceDeck 2.0</b><br><br>"
             "A modern Linux desktop application for managing "
             "systemd services.<br><br>"
-            "Manage, monitor, and configure services with ease.<br><br>"
             "Version 2.0.0<br>",
         )
 
     def keyPressEvent(self, event: Any) -> None:
-        """Toggle menubar visibility when the Alt key is pressed, matching original ServiceDeck."""
+        """Toggle menubar visibility when the Alt key is pressed."""
         if event.key() == Qt.Key.Key_Alt:
             menubar = self.menuBar()
             if menubar is not None:

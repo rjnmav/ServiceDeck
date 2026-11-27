@@ -32,14 +32,13 @@ def main(argv: list[str] | None = None) -> int:
     """Run the ServiceDeck PySide6 desktop application."""
     args = parse_args(argv)
 
-    # Enable High DPI scaling
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 
     app = QApplication(sys.argv if argv is None else [sys.argv[0], *argv])
     app.setApplicationName("ServiceDeck")
-    app.setApplicationDisplayName("ServiceDeck — Systemd Service Manager")
+    app.setApplicationDisplayName("ServiceDeck")
     app.setApplicationVersion("2.0.0")
     app.setWindowIcon(QIcon(":/assets/servicedeck.svg"))
 

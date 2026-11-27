@@ -13,33 +13,34 @@ _DEFAULT_INDEX = QModelIndex()
 
 
 class ServiceTableModel(QAbstractTableModel):
-    """Qt Table Model displaying systemd service unit details."""
+    """Qt Table Model displaying systemd service unit details in a 3-column layout."""
 
     COL_NAME = 0
-    COL_DESCRIPTION = 1
-    COL_ACTIVE_STATE = 2
-    COL_SUB_STATE = 3
-    COL_ENABLED = 4
-    COL_COUNT = 5
+    COL_SERVICE = 0
+    COL_STATUS = 1
+    COL_STARTUP = 2
+    COL_COUNT = 3
+
+    ROLE_DESCRIPTION = Qt.ItemDataRole.UserRole + 1
+    ROLE_ACTIVE_STATE = Qt.ItemDataRole.UserRole + 2
+    ROLE_SUB_STATE = Qt.ItemDataRole.UserRole + 3
+    ROLE_UNIT_FILE_STATE = Qt.ItemDataRole.UserRole + 4
 
     HEADER_LABELS: ClassVar[dict[int, str]] = {
-        COL_NAME: "Service Name",
-        COL_DESCRIPTION: "Description",
-        COL_ACTIVE_STATE: "Active",
-        COL_SUB_STATE: "Sub State",
-        COL_ENABLED: "Enabled",
+        COL_SERVICE: "Service",
+        COL_STATUS: "Status",
+        COL_STARTUP: "Startup",
     }
 
-    # Color definitions matching original ServiceDeck
-    COLOR_SUCCESS = QColor(0x4C, 0xAF, 0x50)  # Green #4CAF50
-    COLOR_DANGER = QColor(0xF4, 0x43, 0x36)  # Red #F44336
-    COLOR_MUTED = QColor(0x9E, 0x9E, 0x9E)  # Gray #9E9E9E
-    COLOR_WARNING = QColor(0xFF, 0xA7, 0x26)  # Orange #FFA726
-    COLOR_BROWN = QColor(0x79, 0x55, 0x48)  # Brown #795548
+    COLOR_SUCCESS = QColor(0x22, 0xC5, 0x5E)
+    COLOR_DANGER = QColor(0xEF, 0x44, 0x44)
+    COLOR_MUTED = QColor(0x94, 0xA3, 0xB8)
+    COLOR_WARNING = QColor(0xF5, 0x9E, 0x0B)
+    COLOR_MASKED = QColor(0xA8, 0x55, 0xF7)
 
     # Row tints for live state changes; translucent so they read on both themes.
-    HIGHLIGHT_CHANGED = QColor(0x42, 0xA5, 0xF5, 70)  # Blue
-    HIGHLIGHT_FAILED = QColor(0xF4, 0x43, 0x36, 90)  # Red
+    HIGHLIGHT_CHANGED = QColor(0x38, 0xBD, 0xF8, 45)
+    HIGHLIGHT_FAILED = QColor(0xEF, 0x44, 0x44, 65)
     #: Seconds a changed row stays highlighted.
     HIGHLIGHT_SECONDS = 4.0
 
@@ -66,6 +67,21 @@ class ServiceTableModel(QAbstractTableModel):
             return 0
         return self.COL_COUNT
 
+    @staticmethod
+    def format_status_text(service: Service) -> str:
+        """Return concise combined status text for display and sorting."""
+        active = service.active_state.lower()
+        sub = service.sub_state.lower()
+        if active == "active" and sub and sub != "running":
+            return f"Active · {sub}"
+        if active == "active":
+            return "Active"
+        if active == "failed":
+            return "Failed"
+        if active == "inactive":
+            return "Inactive"
+        return active.capitalize()
+
     def data(
         self,
         index: QModelIndex | QPersistentModelIndex,
@@ -79,19 +95,34 @@ class ServiceTableModel(QAbstractTableModel):
         col = index.column()
 
         if role == Qt.ItemDataRole.DisplayRole:
-            if col == self.COL_NAME:
+            if col == self.COL_SERVICE:
                 return service.name
-            if col == self.COL_DESCRIPTION:
-                return service.description
-            if col == self.COL_ACTIVE_STATE:
-                return service.active_state.upper()
-            if col == self.COL_SUB_STATE:
-                return service.sub_state.lower()
-            if col == self.COL_ENABLED:
-                return service.unit_file_state.upper()
+            if col == self.COL_STATUS:
+                return self.format_status_text(service)
+            if col == self.COL_STARTUP:
+                return service.unit_file_state.capitalize()
+
+        elif role == Qt.ItemDataRole.ToolTipRole:
+            desc = f"\n{service.description}" if service.description else ""
+            return (
+                f"{service.name}{desc}\n"
+                f"State: {service.active_state} ({service.sub_state}) · Startup: {service.unit_file_state}"
+            )
+
+        elif role == self.ROLE_DESCRIPTION:
+            return service.description
+
+        elif role == self.ROLE_ACTIVE_STATE:
+            return service.active_state.lower()
+
+        elif role == self.ROLE_SUB_STATE:
+            return service.sub_state.lower()
+
+        elif role == self.ROLE_UNIT_FILE_STATE:
+            return service.unit_file_state.lower()
 
         elif role == Qt.ItemDataRole.ForegroundRole:
-            if col == self.COL_ACTIVE_STATE:
+            if col == self.COL_STATUS:
                 state = service.active_state.lower()
                 if state == "active":
                     return self.COLOR_SUCCESS
@@ -101,18 +132,18 @@ class ServiceTableModel(QAbstractTableModel):
                     return self.COLOR_MUTED
                 return self.COLOR_WARNING
 
-            if col == self.COL_ENABLED:
+            if col == self.COL_STARTUP:
                 enabled = service.unit_file_state.lower()
                 if enabled == "enabled":
                     return self.COLOR_SUCCESS
                 if enabled == "disabled":
                     return self.COLOR_DANGER
                 if enabled == "masked":
-                    return self.COLOR_BROWN
+                    return self.COLOR_MASKED
                 return self.COLOR_MUTED
 
         elif role == Qt.ItemDataRole.FontRole:
-            if col in (self.COL_ACTIVE_STATE, self.COL_ENABLED):
+            if col in (self.COL_STATUS, self.COL_STARTUP):
                 return self._bold_font
 
         elif role == Qt.ItemDataRole.BackgroundRole:
@@ -121,7 +152,7 @@ class ServiceTableModel(QAbstractTableModel):
                 return highlight[1]
 
         elif role == Qt.ItemDataRole.TextAlignmentRole:
-            if col in (self.COL_ACTIVE_STATE, self.COL_SUB_STATE, self.COL_ENABLED):
+            if col in (self.COL_STATUS, self.COL_STARTUP):
                 return Qt.AlignmentFlag.AlignCenter
 
         return None
@@ -163,6 +194,15 @@ class ServiceTableModel(QAbstractTableModel):
 
     def is_highlighted(self, name: str) -> bool:
         return name in self._highlights
+
+    def state_counts(self) -> dict[str, int]:
+        """Return total and per-status counts for summary filter chips."""
+        counts = {"all": len(self._services), "active": 0, "failed": 0, "inactive": 0}
+        for service in self._services:
+            state = service.active_state.lower()
+            if state in counts:
+                counts[state] += 1
+        return counts
 
     def apply_service_change(
         self, service: Service, *, highlight: bool = True

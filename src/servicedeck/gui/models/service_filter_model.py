@@ -10,7 +10,7 @@ _DEFAULT_INDEX = QModelIndex()
 
 
 class ServiceFilterModel(QSortFilterProxyModel):
-    """Proxy model filtering services by name and active state with sorting support."""
+    """Proxy model filtering services by name/description and active state."""
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
@@ -23,13 +23,13 @@ class ServiceFilterModel(QSortFilterProxyModel):
         self.setSortRole(Qt.ItemDataRole.DisplayRole)
 
     def set_name_filter(self, text: str) -> None:
-        """Filter services whose names contain the given substring."""
+        """Filter services whose name or description contains the given substring."""
         self._name_filter = text.strip().lower()
         self.invalidate()
 
     def set_active_state_filter(self, state: str) -> None:
         """Filter services by active state ('active', 'inactive', 'failed', or '' for all)."""
-        self._active_state_filter = state.strip().upper()
+        self._active_state_filter = state.strip().lower()
         self.invalidate()
 
     def filterAcceptsRow(
@@ -37,22 +37,21 @@ class ServiceFilterModel(QSortFilterProxyModel):
         source_row: int,
         source_parent: QModelIndex | QPersistentModelIndex = _DEFAULT_INDEX,
     ) -> bool:
-        """Evaluate if the row satisfies both name and active state filters."""
+        """Evaluate if the row satisfies both text and active state filters."""
         source_model = self.sourceModel()
         if source_model is None:
             return True
 
-        name_index = source_model.index(source_row, ServiceTableModel.COL_NAME, source_parent)
-        active_index = source_model.index(
-            source_row, ServiceTableModel.COL_ACTIVE_STATE, source_parent
-        )
-
-        name = str(source_model.data(name_index, Qt.ItemDataRole.DisplayRole) or "").lower()
+        service_index = source_model.index(source_row, ServiceTableModel.COL_SERVICE, source_parent)
+        name = str(source_model.data(service_index, Qt.ItemDataRole.DisplayRole) or "").lower()
+        desc = str(
+            source_model.data(service_index, ServiceTableModel.ROLE_DESCRIPTION) or ""
+        ).lower()
         active_state = str(
-            source_model.data(active_index, Qt.ItemDataRole.DisplayRole) or ""
-        ).upper()
+            source_model.data(service_index, ServiceTableModel.ROLE_ACTIVE_STATE) or ""
+        ).lower()
 
-        if self._name_filter and self._name_filter not in name:
+        if self._name_filter and (self._name_filter not in name and self._name_filter not in desc):
             return False
 
         if self._active_state_filter and active_state != self._active_state_filter:

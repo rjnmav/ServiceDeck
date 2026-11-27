@@ -49,6 +49,21 @@ def test_service_detail_panel_lifecycle(qapp):
     assert panel._desc_val.text() == "A worker service"
     assert panel._active_val.text() == "ACTIVE"
     assert panel._enabled_val.text() == "ENABLED"
+    assert panel._stop_btn.isVisibleTo(panel)
+    assert not panel._start_btn.isVisibleTo(panel)
+
+    stopped = Service(
+        name="test-worker.service",
+        description="A worker service",
+        load_state="loaded",
+        active_state="inactive",
+        sub_state="dead",
+        unit_file_state="enabled",
+        scope="user",
+    )
+    panel.update_service_state(stopped)
+    assert panel._start_btn.isVisibleTo(panel)
+    assert not panel._stop_btn.isVisibleTo(panel)
 
     panel.clear()
     assert panel._name_val.text() == "-"
@@ -113,3 +128,16 @@ def test_create_service_dialog_two_way_sync(qapp):
     assert dlg._exec_edit.text() == "/usr/local/bin/daemon"
     assert dlg._type_combo.currentText() == "forking"
     assert dlg._restart_combo.currentText() == "always"
+
+
+def test_create_service_dialog_inline_validation_non_shifting(qapp):
+    """Verify empty service name shows inline validation banner in reserved slot."""
+    dlg = CreateServiceDialog(default_scope="user")
+    assert dlg._banner_stack.currentIndex() == 0
+
+    dlg._on_create()
+    assert dlg._banner_stack.currentIndex() == 1
+    assert "file name" in dlg._status_banner.text().lower()
+
+    dlg._name_edit.setText("worker")
+    assert dlg._banner_stack.currentIndex() == 0

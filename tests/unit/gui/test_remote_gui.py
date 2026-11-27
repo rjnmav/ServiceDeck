@@ -13,17 +13,15 @@ from servicedeck.gui.views.dialogs.add_remote_device_dialog import AddRemoteDevi
 from servicedeck.gui.views.dialogs.manage_remote_devices_dialog import (
     ManageRemoteDevicesDialog,
 )
+from servicedeck.gui.views.host_sidebar import HostSidebar
 from servicedeck.gui.views.main_window import MainWindow
 from servicedeck.gui.views.service_detail_panel import ServiceDetailPanel
 from servicedeck.gui.views.service_toolbar import ServiceToolbar
 
 
-def test_service_toolbar_host_selector(qapp):
-    """Verify ServiceToolbar host dropdown population and signals."""
-    toolbar = ServiceToolbar()
-    assert toolbar.host_combo.count() >= 2
-    assert toolbar.host_combo.itemData(0) is None  # Local
-
+def test_host_sidebar_selector_and_signals(qapp):
+    """Verify HostSidebar host list, scope toggle, and signals."""
+    sidebar = HostSidebar()
     devices = [
         RemoteDevice(
             id="web-server",
@@ -43,57 +41,46 @@ def test_service_toolbar_host_selector(qapp):
         ),
     ]
 
-    toolbar.set_hosts(devices, current_device_id="web-server")
+    sidebar.set_hosts(devices, current_device_id="web-server")
+    assert len(sidebar._host_rows) == 3  # Local + 2 remote devices
 
-    # Verify items
-    assert toolbar.host_combo.itemData(0) is None
-    assert toolbar.host_combo.itemData(1) == "web-server"
-    assert toolbar.host_combo.itemData(2) == "db-server"
-    assert "Production Web" in toolbar.host_combo.itemText(1)
-    assert "Database Node" in toolbar.host_combo.itemText(2)
-    assert toolbar.host_combo.currentIndex() == 1
-
-    # Signal recording
     host_changes = []
     add_requests = []
-    manage_requests = []
+    scope_changes = []
 
-    toolbar.target_host_changed.connect(host_changes.append)
-    toolbar.add_host_requested.connect(lambda: add_requests.append(True))
-    toolbar.manage_hosts_requested.connect(lambda: manage_requests.append(True))
+    sidebar.target_host_changed.connect(host_changes.append)
+    sidebar.add_host_requested.connect(lambda: add_requests.append(True))
+    sidebar.scope_toggled.connect(scope_changes.append)
 
-    # Switch to DB
-    toolbar.host_combo.setCurrentIndex(2)
-    assert len(host_changes) == 1
-    assert host_changes[-1] == "db-server"
+    sidebar._select_host("db-server")
+    assert host_changes == ["db-server"]
 
-    # Switch to Local
-    toolbar.host_combo.setCurrentIndex(0)
-    assert len(host_changes) == 2
-    assert host_changes[-1] is None
+    sidebar._select_host(None)
+    assert host_changes == ["db-server", None]
 
-    # Trigger Add Host action item
-    add_idx = -1
-    for i in range(toolbar.host_combo.count()):
-        if toolbar.host_combo.itemData(i) == "__add_host__":
-            add_idx = i
-            break
-    assert add_idx != -1
-    toolbar.host_combo.setCurrentIndex(add_idx)
-    assert len(add_requests) == 1
-    # Check that selection restored to current active host (Local)
-    assert toolbar.host_combo.currentIndex() == 0
+    sidebar._add_host_btn.click()
+    assert add_requests == [True]
 
-    # Trigger Manage Hosts action item
-    manage_idx = -1
-    for i in range(toolbar.host_combo.count()):
-        if toolbar.host_combo.itemData(i) == "__manage_hosts__":
-            manage_idx = i
-            break
-    assert manage_idx != -1
-    toolbar.host_combo.setCurrentIndex(manage_idx)
-    assert len(manage_requests) == 1
-    assert toolbar.host_combo.currentIndex() == 0
+    sidebar.system_scope_button.setChecked(True)
+    assert scope_changes == [True]
+
+
+def test_service_toolbar_filter_chips_and_counts(qapp):
+    """Verify ServiceToolbar filter chips update counts and emit state filters."""
+    toolbar = ServiceToolbar()
+    toolbar.update_counts({"all": 10, "active": 6, "failed": 1, "inactive": 3})
+
+    assert "10" in toolbar._chips[""].text()
+    assert "6" in toolbar._chips["active"].text()
+    assert "1" in toolbar._chips["failed"].text()
+    assert "3" in toolbar._chips["inactive"].text()
+
+    filters = []
+    toolbar.active_state_filter_changed.connect(filters.append)
+
+    toolbar._chips["failed"].click()
+    toolbar._chips[""].click()
+    assert filters == ["failed", ""]
 
 
 def test_add_remote_device_dialog_ui_and_id_gen(qapp):
@@ -302,3 +289,15 @@ def test_add_remote_device_dialog_agent_mode_defaults_to_bundled(qapp: Any) -> N
     assert dlg._agent_mode_combo.currentData() == "bundled"
     modes = [dlg._agent_mode_combo.itemData(i) for i in range(dlg._agent_mode_combo.count())]
     assert modes == ["bundled", "installed", "auto"]
+
+
+def test_add_remote_device_dialog_inline_validation_non_shifting(qapp: Any) -> None:
+    dlg = AddRemoteDeviceDialog()
+    assert dlg._banner_stack.currentIndex() == 0
+
+    dlg._on_test_connection_clicked()
+    assert dlg._banner_stack.currentIndex() == 1
+    assert "Host / IP" in dlg._status_banner.text()
+
+    dlg._host_edit.setText("10.0.0.5")
+    assert dlg._banner_stack.currentIndex() == 0

@@ -1,27 +1,34 @@
-"""Dialog for authoring, editing, and installing systemd service unit files matching original ServiceDeck."""
+"""Dialog for authoring, editing, and installing systemd service unit files."""
 
 import re
 from collections.abc import Callable
 from typing import Any
 
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDialog,
     QFormLayout,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QSizePolicy,
+    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 from servicedeck.api_client import ServiceDeckClient
 from servicedeck.api_client.models.service import CreatedService
+from servicedeck.gui.resources.icon_helper import IconHelper
+from servicedeck.gui.resources.theme import get_palette
 from servicedeck.gui.views.dialogs.remote_onboarding import (
     handle_elevation_error,
     needs_elevation,
@@ -45,7 +52,7 @@ DEFAULT_SERVICE_TEMPLATE = (
 
 
 class CreateServiceDialog(QDialog):
-    """Dialog faithfully matching the original ServiceDeck C++ CreateServiceDialog."""
+    """Streamlined modal dialog for creating a new systemd unit with live two-way sync."""
 
     def __init__(
         self,
@@ -56,104 +63,166 @@ class CreateServiceDialog(QDialog):
         target: str | None = None,
         on_elevated: Callable[[], None] | None = None,
     ) -> None:
-        """``target`` (``user@host``) labels the sudo prompt; ``on_elevated`` is called when
-        administrator access is obtained on ``device_id`` so the caller can show it."""
         super().__init__(parent)
         self.setWindowTitle("Create New Service")
-        self.setMinimumSize(850, 550)
+        self.setMinimumSize(860, 580)
         self.setObjectName("createServiceDialog")
         self._client = client
         self._default_scope = default_scope
         self._device_id = device_id
         self._target = target or device_id or "this host"
         self._on_elevated = on_elevated
+        self._theme = getattr(parent, "_current_theme", "dark")
 
         self._setup_ui()
-
-        # Initial sync from default template to form
         self._sync_editor_to_form()
 
     def _setup_ui(self) -> None:
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(16)
+        palette = get_palette(self._theme)
 
-        # ─── Header ───
-        header_layout = QVBoxLayout()
-        title_label = QLabel("Create a New Systemd Service", self)
-        title_font = QFont()
-        title_font.setPointSize(14)
-        title_font.setBold(True)
-        title_label.setFont(title_font)
-        title_label.setObjectName("dialogTitle")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ─── Header Band ───
+        header = QWidget(self)
+        header.setObjectName("dialogHeader")
+        header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(24, 16, 24, 16)
+        header_layout.setSpacing(12)
+
+        icon_lbl = QLabel(header)
+        icon_lbl.setPixmap(IconHelper.svg_icon("terminal", palette.accent).pixmap(QSize(24, 24)))
+        header_layout.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
+
+        header_text = QVBoxLayout()
+        header_text.setSpacing(2)
+        title_label = QLabel("Create a New Systemd Service", header)
+        title_label.setObjectName("contextTitle")
 
         subtitle_label = QLabel(
-            "Configure service properties below or edit the raw unit file directly.", self
+            "Configure the unit fields on the left or edit the systemd definition directly.",
+            header,
         )
-        subtitle_label.setObjectName("dialogSubtitle")
-        subtitle_label.setStyleSheet("color: #718096;")
+        subtitle_label.setObjectName("contextSubtitle")
 
-        header_layout.addWidget(title_label)
-        header_layout.addWidget(subtitle_label)
-        main_layout.addLayout(header_layout)
+        header_text.addWidget(title_label)
+        header_text.addWidget(subtitle_label)
+        header_layout.addLayout(header_text, 1)
+        root.addWidget(header)
 
-        # ─── Split Layout ───
+        # ─── Body ───
+        body = QWidget(self)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(24, 18, 24, 14)
+        body_layout.setSpacing(12)
+
         split_layout = QHBoxLayout()
-        split_layout.setSpacing(20)
+        split_layout.setSpacing(16)
 
-        # ─── Left Pane (Form) ───
+        # ─── Left Pane (Scope + Properties Cards) ───
         left_pane_layout = QVBoxLayout()
+        left_pane_layout.setSpacing(12)
 
-        # Scope selector
-        scope_group = QGroupBox("Service Scope", self)
-        scope_group.setObjectName("scopeGroup")
-        scope_layout = QHBoxLayout(scope_group)
+        # Scope Card with Segmented Control
+        scope_card = QFrame(body)
+        scope_card.setObjectName("dialogCard")
+        scope_card_layout = QVBoxLayout(scope_card)
+        scope_card_layout.setContentsMargins(14, 12, 14, 12)
+        scope_card_layout.setSpacing(8)
 
-        self._user_radio = QRadioButton("User Service", scope_group)
-        self._system_radio = QRadioButton("System Service", scope_group)
-        self._user_radio.setToolTip("Installs to ~/.config/systemd/user/")
-        self._system_radio.setToolTip("Installs to /etc/systemd/system/ (requires authentication)")
+        scope_title = QLabel("Install Scope", scope_card)
+        scope_title.setObjectName("propKey")
+        scope_card_layout.addWidget(scope_title)
+
+        scope_seg = QWidget(scope_card)
+        scope_seg.setObjectName("scopeSegmented")
+        scope_seg.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        seg_layout = QHBoxLayout(scope_seg)
+        seg_layout.setContentsMargins(3, 3, 3, 3)
+        seg_layout.setSpacing(3)
+
+        self._user_scope_btn = QPushButton("User Service", scope_seg)
+        self._user_scope_btn.setObjectName("scopeBtn")
+        self._user_scope_btn.setCheckable(True)
+        self._user_scope_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self._system_scope_btn = QPushButton("System Service", scope_seg)
+        self._system_scope_btn.setObjectName("scopeBtn")
+        self._system_scope_btn.setCheckable(True)
+        self._system_scope_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        scope_group = QButtonGroup(scope_seg)
+        scope_group.setExclusive(True)
+        scope_group.addButton(self._user_scope_btn)
+        scope_group.addButton(self._system_scope_btn)
+
+        seg_layout.addWidget(self._user_scope_btn)
+        seg_layout.addWidget(self._system_scope_btn)
+        scope_card_layout.addWidget(scope_seg)
+
+        # Hidden radio buttons kept synced for backward test/API compatibility
+        self._user_radio = QRadioButton("User Service", scope_card)
+        self._system_radio = QRadioButton("System Service", scope_card)
+        self._user_radio.hide()
+        self._system_radio.hide()
 
         if self._default_scope == "system":
+            self._system_scope_btn.setChecked(True)
             self._system_radio.setChecked(True)
         else:
+            self._user_scope_btn.setChecked(True)
             self._user_radio.setChecked(True)
 
-        scope_layout.addWidget(self._user_radio)
-        scope_layout.addWidget(self._system_radio)
-        left_pane_layout.addWidget(scope_group)
+        self._user_scope_btn.toggled.connect(self._user_radio.setChecked)
+        self._system_scope_btn.toggled.connect(self._system_radio.setChecked)
+        self._user_radio.toggled.connect(self._user_scope_btn.setChecked)
+        self._system_radio.toggled.connect(self._system_scope_btn.setChecked)
 
-        # Path preview label
-        self._path_label = QLabel(self)
+        self._path_label = QLabel(scope_card)
         self._path_label.setWordWrap(True)
-        self._path_label.setStyleSheet("color: #a9b1d6; font-size: 11px; font-style: italic;")
-        self._path_label.setObjectName("pathLabel")
-        left_pane_layout.addWidget(self._path_label)
+        self._path_label.setObjectName("contextSubtitle")
+        scope_card_layout.addWidget(self._path_label)
+        left_pane_layout.addWidget(scope_card)
 
-        # Form settings
-        form_layout = QFormLayout()
-        form_layout.setSpacing(12)
+        # Form Card
+        form_card = QFrame(body)
+        form_card.setObjectName("dialogCard")
+        form_layout = QFormLayout(form_card)
+        form_layout.setContentsMargins(14, 14, 14, 14)
+        form_layout.setHorizontalSpacing(12)
+        form_layout.setVerticalSpacing(12)
+        form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        self._name_edit = QLineEdit(self)
+        def lock_height(widget: QWidget) -> None:
+            widget.setFixedHeight(36)
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self._name_edit = QLineEdit(form_card)
         self._name_edit.setPlaceholderText("my-service.service")
         self._name_edit.setObjectName("serviceNameEdit")
+        lock_height(self._name_edit)
         form_layout.addRow("File Name:", self._name_edit)
 
-        self._desc_edit = QLineEdit(self)
+        self._desc_edit = QLineEdit(form_card)
         self._desc_edit.setPlaceholderText("Description of the service")
+        lock_height(self._desc_edit)
         form_layout.addRow("Description:", self._desc_edit)
 
-        self._exec_edit = QLineEdit(self)
+        self._exec_edit = QLineEdit(form_card)
         self._exec_edit.setPlaceholderText("/usr/bin/my-command")
+        lock_height(self._exec_edit)
         form_layout.addRow("ExecStart:", self._exec_edit)
 
-        self._type_combo = QComboBox(self)
+        self._type_combo = QComboBox(form_card)
         self._type_combo.addItems(
             ["simple", "exec", "forking", "oneshot", "dbus", "notify", "idle"]
         )
+        lock_height(self._type_combo)
         form_layout.addRow("Type:", self._type_combo)
 
-        self._restart_combo = QComboBox(self)
+        self._restart_combo = QComboBox(form_card)
         self._restart_combo.addItems(
             [
                 "no",
@@ -166,22 +235,28 @@ class CreateServiceDialog(QDialog):
             ]
         )
         self._restart_combo.setCurrentText("on-failure")
+        lock_height(self._restart_combo)
         form_layout.addRow("Restart:", self._restart_combo)
 
-        left_pane_layout.addLayout(form_layout)
+        left_pane_layout.addWidget(form_card)
         left_pane_layout.addStretch()
 
-        split_layout.addLayout(left_pane_layout, 1)
+        left_widget = QWidget(body)
+        left_widget.setLayout(left_pane_layout)
+        split_layout.addWidget(left_widget, 1)
 
-        # ─── Right Pane (Editor) ───
-        right_pane_layout = QVBoxLayout()
-        content_label = QLabel("Unit File Preview & Editor:", self)
-        bold_font = QFont(content_label.font())
-        bold_font.setBold(True)
-        content_label.setFont(bold_font)
+        # ─── Right Pane (Unit Editor Card) ───
+        editor_card = QFrame(body)
+        editor_card.setObjectName("dialogCard")
+        right_pane_layout = QVBoxLayout(editor_card)
+        right_pane_layout.setContentsMargins(14, 12, 14, 14)
+        right_pane_layout.setSpacing(8)
+
+        content_label = QLabel("Unit File Preview & Editor", editor_card)
+        content_label.setObjectName("propKey")
         right_pane_layout.addWidget(content_label)
 
-        self._content_edit = QTextEdit(self)
+        self._content_edit = QTextEdit(editor_card)
         self._content_edit.setObjectName("unitContentEdit")
         mono_font = QFont("Monospace", 10)
         mono_font.setStyleHint(QFont.StyleHint.Monospace)
@@ -190,23 +265,44 @@ class CreateServiceDialog(QDialog):
         self._content_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         right_pane_layout.addWidget(self._content_edit, 1)
 
-        split_layout.addLayout(right_pane_layout, 1)
+        split_layout.addWidget(editor_card, 1)
+        body_layout.addLayout(split_layout, 1)
 
-        main_layout.addLayout(split_layout, 1)
+        # Reserved non-shifting validation/status banner
+        self._banner_stack = QStackedWidget(body)
+        self._banner_stack.setFixedHeight(42)
+        self._banner_stack.addWidget(QWidget(self._banner_stack))
 
-        # ─── Buttons ───
-        btn_layout = QHBoxLayout()
+        self._status_banner = QLabel("", self._banner_stack)
+        self._status_banner.setObjectName("dialogBanner")
+        self._status_banner.setWordWrap(True)
+        self._status_banner.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self._banner_stack.addWidget(self._status_banner)
+        self._banner_stack.setCurrentIndex(0)
+        body_layout.addWidget(self._banner_stack)
+
+        root.addWidget(body, 1)
+
+        # ─── Footer Band ───
+        footer = QWidget(self)
+        footer.setObjectName("dialogFooter")
+        footer.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        btn_layout = QHBoxLayout(footer)
+        btn_layout.setContentsMargins(24, 14, 24, 14)
+        btn_layout.setSpacing(10)
         btn_layout.addStretch()
 
-        self._cancel_btn = QPushButton("Cancel", self)
+        self._cancel_btn = QPushButton("Cancel", footer)
         self._cancel_btn.setObjectName("cancelBtn")
-        self._create_btn = QPushButton("Create", self)
+        self._cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._create_btn = QPushButton("Create Service", footer)
         self._create_btn.setObjectName("primary")
         self._create_btn.setDefault(True)
+        self._create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
         btn_layout.addWidget(self._cancel_btn)
         btn_layout.addWidget(self._create_btn)
-        main_layout.addLayout(btn_layout)
+        root.addWidget(footer)
 
         # ─── Connections ───
         self._cancel_btn.clicked.connect(self.reject)
@@ -217,11 +313,11 @@ class CreateServiceDialog(QDialog):
         self._type_combo.currentTextChanged.connect(self._sync_form_to_editor)
         self._restart_combo.currentTextChanged.connect(self._sync_form_to_editor)
 
-        self._content_edit.textChanged.connect(self._sync_editor_to_form)
+        self._content_edit.textChanged.connect(self._on_editor_changed)
 
         self._user_radio.toggled.connect(self._update_path_info)
         self._system_radio.toggled.connect(self._update_path_info)
-        self._name_edit.textChanged.connect(self._update_path_info)
+        self._name_edit.textChanged.connect(self._on_name_changed)
 
         self._update_path_info()
 
@@ -229,6 +325,33 @@ class CreateServiceDialog(QDialog):
     def _editor(self) -> QTextEdit:
         """Alias for _content_edit for backward compatibility with tests."""
         return self._content_edit
+
+    def _set_name_invalid(self, invalid: bool) -> None:
+        self._name_edit.setProperty("invalid", "true" if invalid else "false")
+        self._name_edit.style().unpolish(self._name_edit)
+        self._name_edit.style().polish(self._name_edit)
+
+    def _show_banner(self, message: str, *, state: str = "error") -> None:
+        self._status_banner.setText(message)
+        self._status_banner.setProperty("state", state)
+        self._status_banner.style().unpolish(self._status_banner)
+        self._status_banner.style().polish(self._status_banner)
+        self._banner_stack.setCurrentIndex(1)
+
+    def _clear_banner(self) -> None:
+        self._status_banner.setText("")
+        self._banner_stack.setCurrentIndex(0)
+
+    def _on_name_changed(self, text: str) -> None:
+        if text.strip():
+            self._set_name_invalid(False)
+            self._clear_banner()
+        self._update_path_info()
+
+    def _on_editor_changed(self) -> None:
+        if self._content_edit.toPlainText().strip():
+            self._clear_banner()
+        self._sync_editor_to_form()
 
     def _update_path_info(self) -> None:
         file_name = self._name_edit.text().strip()
@@ -239,15 +362,11 @@ class CreateServiceDialog(QDialog):
 
         if self._user_radio.isChecked():
             self._path_label.setText(
-                f"<b>User Mode:</b> Service will be installed to "
-                f"<code>~/.config/systemd/user/{file_name}</code>. "
-                f"This service runs under your user account and doesn't require root privileges."
+                f"Target: <code>~/.config/systemd/user/{file_name}</code> (no root required)"
             )
         else:
             self._path_label.setText(
-                f"<b>System Mode:</b> Service will be installed to "
-                f"<code>/etc/systemd/system/{file_name}</code>. "
-                f"This service runs globally for all users and requires root (pkexec) to install."
+                f"Target: <code>/etc/systemd/system/{file_name}</code> (requires authentication)"
             )
 
     def file_name(self) -> str:
@@ -378,7 +497,8 @@ class CreateServiceDialog(QDialog):
     def _on_create(self) -> None:
         raw_name = self._name_edit.text().strip()
         if not raw_name:
-            QMessageBox.warning(self, "Validation Error", "Please enter a service file name.")
+            self._set_name_invalid(True)
+            self._show_banner("Please enter a service file name (e.g. my-service.service).")
             self._name_edit.setFocus()
             return
 
@@ -386,9 +506,8 @@ class CreateServiceDialog(QDialog):
         self._name_edit.setText(name)
         content_text = self.content().strip()
         if not content_text:
-            QMessageBox.warning(
-                self, "Validation Error", "Service unit file content cannot be empty."
-            )
+            self._show_banner("Service unit file content cannot be empty.")
+            self._content_edit.setFocus()
             return
 
         scope = "system" if self.is_system_scope() else "user"
@@ -413,10 +532,11 @@ class CreateServiceDialog(QDialog):
         def on_start() -> None:
             self._create_btn.setEnabled(False)
             self._create_btn.setText("Creating...")
+            self._show_banner(f"Creating '{name}' ({scope} scope)...", state="info")
 
         def on_success(res: CreatedService) -> None:
             self._create_btn.setEnabled(True)
-            self._create_btn.setText("Create")
+            self._create_btn.setText("Create Service")
             QMessageBox.information(
                 self,
                 "Service Created",
@@ -427,7 +547,8 @@ class CreateServiceDialog(QDialog):
 
         def show_failure(msg: str) -> None:
             self._create_btn.setEnabled(True)
-            self._create_btn.setText("Create")
+            self._create_btn.setText("Create Service")
+            self._show_banner(f"Failed to create '{name}': {msg}", state="error")
             QMessageBox.critical(
                 self,
                 "Creation Failed",

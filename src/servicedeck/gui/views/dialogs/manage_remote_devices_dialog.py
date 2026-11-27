@@ -3,7 +3,6 @@
 from typing import Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -40,23 +39,18 @@ class ManageRemoteDevicesDialog(QDialog):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(22, 22, 22, 22)
         layout.setSpacing(14)
 
-        # Header
         title_label = QLabel("Configured Remote Hosts", self)
-        title_font = QFont()
-        title_font.setPointSize(13)
-        title_font.setBold(True)
-        title_label.setFont(title_font)
+        title_label.setObjectName("contextTitle")
         layout.addWidget(title_label)
 
-        # Table
         self._table = QTableWidget(self)
         self._table.setColumnCount(5)
         self._table.setHorizontalHeaderLabels(["Name", "Host / IP", "Port", "User", "Status"])
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.setAlternatingRowColors(True)
@@ -64,7 +58,6 @@ class ManageRemoteDevicesDialog(QDialog):
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self._table)
 
-        # Buttons
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
 
@@ -90,10 +83,8 @@ class ManageRemoteDevicesDialog(QDialog):
         btn_layout.addStretch()
 
         self._switch_btn = QPushButton("Switch To Host", self)
+        self._switch_btn.setObjectName("primary")
         self._switch_btn.setEnabled(False)
-        self._switch_btn.setStyleSheet(
-            "background-color: #1971c2; color: #ffffff; font-weight: bold; padding: 6px 14px; border-radius: 6px;"
-        )
         self._switch_btn.clicked.connect(self._on_switch_clicked)
         btn_layout.addWidget(self._switch_btn)
 
@@ -122,7 +113,7 @@ class ManageRemoteDevicesDialog(QDialog):
                 port_item = QTableWidgetItem(str(dev.port))
                 user_item = QTableWidgetItem(dev.username or "(default)")
 
-                status_str = "🟢 Connected" if dev.connected else "⚪ Offline"
+                status_str = "Connected" if dev.connected else "Offline"
                 status_item = QTableWidgetItem(status_str)
 
                 self._table.setItem(row, 0, name_item)

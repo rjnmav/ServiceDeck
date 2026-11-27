@@ -46,6 +46,11 @@ def test_filter_by_name(qapp):
     idx = filter_model.index(0, ServiceTableModel.COL_NAME)
     assert filter_model.data(idx) == "ssh.service"
 
+    # Filter by description ("Scheduler")
+    filter_model.set_name_filter("scheduler")
+    assert filter_model.rowCount() == 1
+    assert filter_model.data(filter_model.index(0, ServiceTableModel.COL_NAME)) == "cups.service"
+
     # Filter with no match
     filter_model.set_name_filter("nonexistent")
     assert filter_model.rowCount() == 0

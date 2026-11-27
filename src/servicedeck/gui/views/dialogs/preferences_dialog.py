@@ -2,12 +2,13 @@
 
 from typing import Any
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -29,7 +30,7 @@ class PreferencesDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Preferences")
-        self.setMinimumWidth(350)
+        self.setMinimumWidth(380)
         self._current_theme = current_theme
         self._log_interval = log_interval
         self._res_interval = res_interval
@@ -37,43 +38,51 @@ class PreferencesDialog(QDialog):
 
     def _setup_ui(self) -> None:
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(24, 22, 24, 22)
+        main_layout.setSpacing(16)
+
+        title = QLabel("Preferences", self)
+        title.setObjectName("contextTitle")
+        main_layout.addWidget(title)
 
         form_layout = QFormLayout()
-
-        self._log_spin = QSpinBox(self)
-        self._log_spin.setRange(1, 60)
-        self._log_spin.setValue(self._log_interval)
-        self._log_spin.setSuffix(" seconds")
-        form_layout.addRow("Log Refresh Interval:", self._log_spin)
-
-        self._res_spin = QSpinBox(self)
-        self._res_spin.setRange(1, 60)
-        self._res_spin.setValue(self._res_interval)
-        self._res_spin.setSuffix(" seconds")
-        form_layout.addRow("Resource Refresh Interval:", self._res_spin)
+        form_layout.setSpacing(12)
+        form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         self._theme_combo = QComboBox(self)
         self._theme_combo.addItems(["dark", "light"])
         idx = self._theme_combo.findText(self._current_theme)
         if idx >= 0:
             self._theme_combo.setCurrentIndex(idx)
-        form_layout.addRow("UI Theme:", self._theme_combo)
+        form_layout.addRow("Appearance Theme:", self._theme_combo)
+
+        self._log_spin = QSpinBox(self)
+        self._log_spin.setRange(1, 60)
+        self._log_spin.setValue(self._log_interval)
+        self._log_spin.setSuffix(" seconds")
+        form_layout.addRow("Log Polling Interval:", self._log_spin)
+
+        self._res_spin = QSpinBox(self)
+        self._res_spin.setRange(1, 60)
+        self._res_spin.setValue(self._res_interval)
+        self._res_spin.setSuffix(" seconds")
+        form_layout.addRow("Resource Refresh:", self._res_spin)
 
         main_layout.addLayout(form_layout)
         main_layout.addStretch()
 
         btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
         self._apply_btn = QPushButton("Apply", self)
-        self._ok_btn = QPushButton("OK", self)
         self._cancel_btn = QPushButton("Cancel", self)
+        self._ok_btn = QPushButton("Save", self)
+        self._ok_btn.setObjectName("primary")
         self._ok_btn.setDefault(True)
 
         btn_layout.addStretch()
         btn_layout.addWidget(self._apply_btn)
-        btn_layout.addWidget(self._ok_btn)
         btn_layout.addWidget(self._cancel_btn)
+        btn_layout.addWidget(self._ok_btn)
 
         main_layout.addLayout(btn_layout)
 

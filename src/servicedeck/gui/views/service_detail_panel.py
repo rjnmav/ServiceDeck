@@ -1,4 +1,4 @@
-"""Dock widget presenting detailed properties, unit file, logs, and live resource usage."""
+"""Right-side inspector drawer presenting contextual actions, overview, logs, and unit file."""
 
 import collections
 import os
@@ -6,16 +6,19 @@ import time
 from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
-    QDockWidget,
-    QFormLayout,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -29,6 +32,8 @@ from servicedeck.api_client.models.service import (
     ServiceResources,
     ServiceUnitFile,
 )
+from servicedeck.gui.resources.icon_helper import IconHelper
+from servicedeck.gui.resources.theme import get_palette
 from servicedeck.gui.workers.service_worker import run_async_task
 from servicedeck.gui.workers.stream_worker import StreamWorker
 
@@ -78,22 +83,30 @@ def format_duration(total_seconds: int | float) -> str:
     return f"{seconds}s"
 
 
-class ServiceDetailPanel(QDockWidget):
-    """Bottom dock widget showing tabbed details for the selected service."""
+class ServiceDetailPanel(QWidget):
+    """Right-side inspector drawer showing contextual actions, overview, logs, and unit file."""
 
-    def __init__(self, parent: Any = None, client: ServiceDeckClient | None = None) -> None:
-        super().__init__("Service Details", parent)
+    action_requested = Signal(str)  # start, stop, restart, enable, disable, mask, unmask, reload
+    close_requested = Signal()
+
+    def __init__(
+        self,
+        parent: Any = None,
+        client: ServiceDeckClient | None = None,
+        theme: str = "dark",
+    ) -> None:
+        super().__init__(parent)
         self.setObjectName("detailPanel")
-        self.setMinimumHeight(200)
-        self.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QDockWidget.DockWidgetFeature.DockWidgetVerticalTitleBar
-        )
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setWindowTitle("Service Details")
+        self.setMinimumWidth(380)
+
         self._client: ServiceDeckClient | None = client
+        self._theme = theme
         self._current_service: Service | None = None
         self._current_scope: str = "user"
         self._current_device_id: str | None = None
+        self._actions_enabled = True
 
         # Previous samples for rate/CPU calculations
         self._previous_cpu_ns: int | None = None
@@ -110,6 +123,7 @@ class ServiceDetailPanel(QDockWidget):
 
         self._setup_ui()
         self._setup_timers()
+        self.refresh_theme(theme)
 
     def set_client(self, client: ServiceDeckClient) -> None:
         """Assign or update the API client instance."""
@@ -117,14 +131,13 @@ class ServiceDetailPanel(QDockWidget):
 
     def _setup_timers(self) -> None:
         self._log_timer = QTimer(self)
-        self._log_timer.setInterval(5000)  # 5 seconds default
+        self._log_timer.setInterval(5000)
         self._log_timer.timeout.connect(self.refresh_service_logs)
 
         self._resource_timer = QTimer(self)
-        self._resource_timer.setInterval(2000)  # 2 seconds default
+        self._resource_timer.setInterval(2000)
         self._resource_timer.timeout.connect(self.refresh_resource_usage)
 
-        # Coalesces bursts of followed lines into one view update.
         self._log_flush_timer = QTimer(self)
         self._log_flush_timer.setSingleShot(True)
         self._log_flush_timer.setInterval(50)
@@ -136,94 +149,240 @@ class ServiceDetailPanel(QDockWidget):
         self._resource_timer.setInterval(max(500, res_interval_sec * 1000))
 
     def _setup_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ─── Pinned Inspector Header ───
+        header = QWidget(self)
+        header.setObjectName("inspectorHeader")
+        header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(18, 14, 14, 14)
+        header_layout.setSpacing(8)
+
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+
+        self._name_val = QLabel("-")
+        self._name_val.setObjectName("inspectorTitle")
+        self._name_val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._name_val.setWordWrap(True)
+        title_row.addWidget(self._name_val, 1)
+
+        self._close_btn = QPushButton(header)
+        self._close_btn.setObjectName("iconBtn")
+        self._close_btn.setFixedSize(28, 28)
+        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close_btn.setToolTip("Close inspector (Esc)")
+        self._close_btn.clicked.connect(self._on_close_clicked)
+        title_row.addWidget(self._close_btn, 0, Qt.AlignmentFlag.AlignTop)
+        header_layout.addLayout(title_row)
+
+        self._desc_val = QLabel("-")
+        self._desc_val.setObjectName("inspectorDesc")
+        self._desc_val.setWordWrap(True)
+        self._desc_val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        header_layout.addWidget(self._desc_val)
+
+        # Pills Row + Dedicated Contextual Actions Row
+        pills_row = QHBoxLayout()
+        pills_row.setSpacing(6)
+
+        self._active_val = QLabel("-")
+        self._active_val.setObjectName("statusPill")
+        pills_row.addWidget(self._active_val)
+
+        self._enabled_val = QLabel("-")
+        self._enabled_val.setObjectName("statusPill")
+        pills_row.addWidget(self._enabled_val)
+        pills_row.addStretch()
+        header_layout.addLayout(pills_row)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+
+        self._start_btn = QPushButton("Start", header)
+        self._start_btn.setObjectName("successBtn")
+        self._start_btn.setIconSize(QSize(13, 13))
+        self._start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._start_btn.clicked.connect(lambda: self.action_requested.emit("start"))
+        action_row.addWidget(self._start_btn)
+
+        self._restart_btn = QPushButton("Restart", header)
+        self._restart_btn.setIconSize(QSize(13, 13))
+        self._restart_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._restart_btn.clicked.connect(lambda: self.action_requested.emit("restart"))
+        action_row.addWidget(self._restart_btn)
+
+        self._stop_btn = QPushButton("Stop", header)
+        self._stop_btn.setObjectName("dangerBtn")
+        self._stop_btn.setIconSize(QSize(13, 13))
+        self._stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._stop_btn.clicked.connect(lambda: self.action_requested.emit("stop"))
+        action_row.addWidget(self._stop_btn)
+
+        action_row.addStretch()
+
+        self._more_btn = QPushButton(header)
+        self._more_btn.setObjectName("iconBtn")
+        self._more_btn.setFixedSize(30, 30)
+        self._more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._more_btn.setToolTip("More service actions (Enable, Disable, Mask, Unmask)")
+        self._more_btn.clicked.connect(self._show_more_actions)
+        action_row.addWidget(self._more_btn)
+
+        header_layout.addLayout(action_row)
+        root.addWidget(header)
+
+        # ─── Tabs: Overview | Logs | Unit File ───
         self._tab_widget = QTabWidget(self)
         self._tab_widget.setObjectName("detailTabs")
         self._tab_widget.currentChanged.connect(self._on_tab_changed)
 
-        # ─── Tab 1: Properties ───
-        props_widget = QWidget()
-        props_layout = QFormLayout(props_widget)
-        props_layout.setContentsMargins(16, 16, 16, 16)
-        props_layout.setSpacing(8)
+        # Tab 1: Overview (Resources + Properties)
+        overview_scroll = QScrollArea()
+        overview_scroll.setObjectName("inspectorScroll")
+        overview_scroll.setWidgetResizable(True)
+        overview_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        overview_scroll.viewport().setObjectName("inspectorViewport")
+        overview_scroll.viewport().setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
-        def make_label(text: str = "-") -> QLabel:
-            lbl = QLabel(text)
+        overview_widget = QWidget()
+        overview_widget.setObjectName("overviewPage")
+        overview_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        overview_layout = QVBoxLayout(overview_widget)
+        overview_layout.setContentsMargins(16, 14, 16, 16)
+        overview_layout.setSpacing(14)
+
+        res_heading = QLabel("Live Resources", overview_widget)
+        res_heading.setObjectName("sidebarSectionLabel")
+        overview_layout.addWidget(res_heading)
+
+        res_grid = QGridLayout()
+        res_grid.setSpacing(10)
+
+        def make_metric_card(title: str) -> tuple[QFrame, QLabel]:
+            card = QFrame(overview_widget)
+            card.setObjectName("metricCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 10, 12, 10)
+            card_layout.setSpacing(4)
+            lbl = QLabel(title, card)
+            lbl.setObjectName("metricLabel")
+            val = QLabel("-", card)
+            val.setObjectName("metricValue")
+            val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            card_layout.addWidget(lbl)
+            card_layout.addWidget(val)
+            return card, val
+
+        cpu_card, self._cpu_val = make_metric_card("CPU")
+        mem_card, self._mem_val = make_metric_card("Memory")
+        procs_card, self._procs_val = make_metric_card("Main Process")
+        threads_card, self._threads_val = make_metric_card("Tasks / Threads")
+        uptime_card, self._uptime_val = make_metric_card("Uptime")
+        since_card, self._running_since_val = make_metric_card("Running Since")
+        disk_r_card, self._disk_read_val = make_metric_card("Disk Read")
+        disk_w_card, self._disk_write_val = make_metric_card("Disk Write")
+
+        res_grid.addWidget(cpu_card, 0, 0)
+        res_grid.addWidget(mem_card, 0, 1)
+        res_grid.addWidget(procs_card, 1, 0)
+        res_grid.addWidget(threads_card, 1, 1)
+        res_grid.addWidget(uptime_card, 2, 0)
+        res_grid.addWidget(since_card, 2, 1)
+        res_grid.addWidget(disk_r_card, 3, 0)
+        res_grid.addWidget(disk_w_card, 3, 1)
+        overview_layout.addLayout(res_grid)
+
+        props_heading = QLabel("Unit Details", overview_widget)
+        props_heading.setObjectName("sidebarSectionLabel")
+        overview_layout.addWidget(props_heading)
+
+        prop_card = QFrame(overview_widget)
+        prop_card.setObjectName("propGroup")
+        prop_grid = QGridLayout(prop_card)
+        prop_grid.setContentsMargins(14, 12, 14, 12)
+        prop_grid.setHorizontalSpacing(14)
+        prop_grid.setVerticalSpacing(8)
+        prop_grid.setColumnStretch(1, 1)
+
+        def make_prop_val(text: str = "-") -> QLabel:
+            lbl = QLabel(text, prop_card)
+            lbl.setObjectName("propVal")
+            lbl.setWordWrap(True)
             lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             return lbl
 
-        self._name_val = make_label()
-        self._desc_val = make_label()
-        self._active_val = make_label()
-        self._sub_state_val = make_label()
-        self._load_val = make_label()
-        self._enabled_val = make_label()
-        self._path_val = make_label()
-        self._scope_val = make_label()
+        self._sub_state_val = make_prop_val()
+        self._load_val = make_prop_val()
+        self._scope_val = make_prop_val()
+        self._path_val = make_prop_val()
 
-        bold_font = QFont()
-        bold_font.setBold(True)
+        prop_rows: list[tuple[str, QWidget]] = [
+            ("Sub State", self._sub_state_val),
+            ("Load State", self._load_val),
+            ("Scope", self._scope_val),
+            ("Unit Path", self._path_val),
+        ]
+        for row_idx, (key_text, val_widget) in enumerate(prop_rows):
+            key_lbl = QLabel(key_text, prop_card)
+            key_lbl.setObjectName("propKey")
+            prop_grid.addWidget(key_lbl, row_idx, 0, Qt.AlignmentFlag.AlignTop)
+            prop_grid.addWidget(val_widget, row_idx, 1)
 
-        def add_row(label_text: str, val_widget: QLabel) -> None:
-            lbl = QLabel(label_text)
-            lbl.setFont(bold_font)
-            props_layout.addRow(lbl, val_widget)
+        overview_layout.addWidget(prop_card)
+        overview_layout.addStretch()
+        overview_scroll.setWidget(overview_widget)
+        self._tab_widget.addTab(overview_scroll, "Overview")
 
-        add_row("Service Name:", self._name_val)
-        add_row("Description:", self._desc_val)
-        add_row("Active State:", self._active_val)
-        add_row("Sub State:", self._sub_state_val)
-        add_row("Load State:", self._load_val)
-        add_row("Enabled:", self._enabled_val)
-        add_row("Unit Path:", self._path_val)
-        add_row("Scope:", self._scope_val)
-
-        self._tab_widget.addTab(props_widget, "Properties")
-
-        # ─── Tab 2: Unit File ───
+        # Tab 2: Service Logs
         mono_font = QFont("Monospace", 10)
         mono_font.setStyleHint(QFont.StyleHint.Monospace)
 
-        self._unit_file_edit = QTextEdit()
-        self._unit_file_edit.setReadOnly(True)
-        self._unit_file_edit.setObjectName("unitFileViewer")
-        self._unit_file_edit.setFont(mono_font)
-        self._tab_widget.addTab(self._unit_file_edit, "Unit File")
-
-        # ─── Tab 3: Service Logs ───
         logs_widget = QWidget()
+        logs_widget.setObjectName("logsPage")
+        logs_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         logs_layout = QVBoxLayout(logs_widget)
-        logs_layout.setContentsMargins(0, 4, 0, 0)
-        logs_layout.setSpacing(4)
+        logs_layout.setContentsMargins(12, 10, 12, 12)
+        logs_layout.setSpacing(8)
 
         controls = QHBoxLayout()
-        controls.setContentsMargins(8, 0, 8, 0)
+        controls.setSpacing(8)
         self._follow_check = QCheckBox("Follow")
         self._follow_check.setObjectName("logFollowToggle")
         self._follow_check.setChecked(True)
         self._follow_check.setToolTip(
-            "Stream new journal lines as they are written (pause to stop)"
+            "Stream new journal lines as they are written (uncheck to pause)"
         )
         self._follow_check.toggled.connect(self._on_follow_toggled)
+
         self._autoscroll_check = QCheckBox("Auto-scroll")
         self._autoscroll_check.setObjectName("logAutoScrollToggle")
         self._autoscroll_check.setChecked(True)
         self._autoscroll_check.toggled.connect(self._on_autoscroll_toggled)
-        self._log_filter_edit = QLineEdit()
-        self._log_filter_edit.setObjectName("logFilter")
-        self._log_filter_edit.setPlaceholderText("Filter log lines…")
-        self._log_filter_edit.setClearButtonEnabled(True)
-        self._log_filter_edit.textChanged.connect(self._on_log_filter_changed)
+
+        self._log_status = QLabel("")
+        self._log_status.setObjectName("logStatus")
+
         self._log_clear_button = QPushButton("Clear")
         self._log_clear_button.setObjectName("logClearButton")
         self._log_clear_button.clicked.connect(self.clear_log_view)
-        self._log_status = QLabel("")
-        self._log_status.setObjectName("logStatus")
+
         controls.addWidget(self._follow_check)
         controls.addWidget(self._autoscroll_check)
-        controls.addWidget(self._log_filter_edit, 1)
-        controls.addWidget(self._log_clear_button)
+        controls.addStretch()
         controls.addWidget(self._log_status)
+        controls.addWidget(self._log_clear_button)
         logs_layout.addLayout(controls)
+
+        self._log_filter_edit = QLineEdit()
+        self._log_filter_edit.setObjectName("logFilter")
+        self._log_filter_edit.setPlaceholderText("Filter log lines...")
+        self._log_filter_edit.setClearButtonEnabled(True)
+        self._log_filter_edit.textChanged.connect(self._on_log_filter_changed)
+        logs_layout.addWidget(self._log_filter_edit)
 
         self._log_edit = QTextEdit()
         self._log_edit.setReadOnly(True)
@@ -231,45 +390,107 @@ class ServiceDetailPanel(QDockWidget):
         self._log_edit.setFont(mono_font)
         self._log_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         logs_layout.addWidget(self._log_edit, 1)
-        self._tab_widget.addTab(logs_widget, "Service Logs")
+        self._tab_widget.addTab(logs_widget, "Logs")
 
-        # ─── Tab 4: Resource Usage ───
-        res_widget = QWidget()
-        res_layout = QFormLayout(res_widget)
-        res_layout.setContentsMargins(16, 16, 16, 16)
-        res_layout.setSpacing(8)
+        # Tab 3: Unit File
+        unit_widget = QWidget()
+        unit_widget.setObjectName("unitFilePage")
+        unit_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        unit_layout = QVBoxLayout(unit_widget)
+        unit_layout.setContentsMargins(12, 10, 12, 12)
+        unit_layout.setSpacing(8)
 
-        def add_res_row(label_text: str) -> QLabel:
-            val_lbl = make_label("N/A")
-            lbl = QLabel(label_text)
-            lbl.setFont(bold_font)
-            res_layout.addRow(lbl, val_lbl)
-            return val_lbl
+        unit_bar = QHBoxLayout()
+        self._unit_path_hint = QLabel("Read-only systemd unit definition", unit_widget)
+        self._unit_path_hint.setObjectName("contextSubtitle")
+        unit_bar.addWidget(self._unit_path_hint, 1)
 
-        self._running_since_val = add_res_row("Running Since:")
-        self._uptime_val = add_res_row("Uptime:")
-        self._cpu_val = add_res_row("CPU:")
-        self._mem_val = add_res_row("Memory:")
-        self._disk_read_val = add_res_row("Disk Read:")
-        self._disk_write_val = add_res_row("Disk Write:")
-        self._procs_val = add_res_row("Processes:")
-        self._threads_val = add_res_row("Threads:")
+        self._copy_unit_btn = QPushButton("Copy", unit_widget)
+        self._copy_unit_btn.setObjectName("iconBtn")
+        self._copy_unit_btn.setIconSize(QSize(13, 13))
+        self._copy_unit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._copy_unit_btn.clicked.connect(self._copy_unit_file)
+        unit_bar.addWidget(self._copy_unit_btn)
+        unit_layout.addLayout(unit_bar)
 
-        self._tab_widget.addTab(res_widget, "Resource Usage")
+        self._unit_file_edit = QTextEdit()
+        self._unit_file_edit.setReadOnly(True)
+        self._unit_file_edit.setObjectName("unitFileViewer")
+        self._unit_file_edit.setFont(mono_font)
+        unit_layout.addWidget(self._unit_file_edit, 1)
+        self._tab_widget.addTab(unit_widget, "Unit File")
 
-        self.setWidget(self._tab_widget)
+        root.addWidget(self._tab_widget, 1)
+
+    def _on_close_clicked(self) -> None:
+        self.hide()
+        self.close_requested.emit()
+
+    def _copy_unit_file(self) -> None:
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self._unit_file_edit.toPlainText())
+            self._copy_unit_btn.setText("Copied")
+            QTimer.singleShot(1500, lambda: self._copy_unit_btn.setText("Copy"))
+
+    def set_actions_enabled(self, enabled: bool) -> None:
+        """Enable or disable inspector action buttons while a service op is in flight."""
+        self._actions_enabled = enabled
+        self._start_btn.setEnabled(enabled)
+        self._restart_btn.setEnabled(enabled)
+        self._stop_btn.setEnabled(enabled)
+        self._more_btn.setEnabled(enabled)
+
+    def _show_more_actions(self) -> None:
+        if not self._current_service:
+            return
+        menu = QMenu(self)
+        palette = get_palette(self._theme)
+        enabled_state = self._current_service.unit_file_state.lower()
+
+        if enabled_state != "enabled":
+            menu.addAction(
+                IconHelper.svg_icon("check", palette.success_text),
+                "Enable at Boot",
+                lambda: self.action_requested.emit("enable"),
+            )
+        if enabled_state == "enabled":
+            menu.addAction(
+                IconHelper.svg_icon("ban", palette.danger_text),
+                "Disable at Boot",
+                lambda: self.action_requested.emit("disable"),
+            )
+        menu.addAction(
+            IconHelper.svg_icon("refresh", palette.text_primary),
+            "Reload Unit",
+            lambda: self.action_requested.emit("reload"),
+        )
+        menu.addSeparator()
+        if enabled_state == "masked":
+            menu.addAction(
+                IconHelper.svg_icon("unlock", palette.success_text),
+                "Unmask",
+                lambda: self.action_requested.emit("unmask"),
+            )
+        else:
+            menu.addAction(
+                IconHelper.svg_icon("lock", palette.masked_text),
+                "Mask",
+                lambda: self.action_requested.emit("mask"),
+            )
+        menu.exec(self._more_btn.mapToGlobal(self._more_btn.rect().bottomLeft()))
 
     def _on_tab_changed(self, index: int) -> None:
         """Fetch fresh tab data immediately upon switching."""
         if not self._current_service:
             return
-        if index == 1:  # Unit File
-            self.refresh_unit_file()
-        elif index == 2:  # Logs
+        if index == 0:  # Overview
+            self.refresh_resource_usage()
+        elif index == 1:  # Logs
             if not self.is_following_logs:
                 self.refresh_service_logs()
-        elif index == 3:  # Resources
-            self.refresh_resource_usage()
+        elif index == 2:  # Unit File
+            self.refresh_unit_file()
 
     def show_service_details(
         self,
@@ -277,7 +498,7 @@ class ServiceDetailPanel(QDockWidget):
         scope: str | None = None,
         device_id: str | None = None,
     ) -> None:
-        """Populate the details panel with properties for the given service."""
+        """Populate the inspector drawer with details for the given service."""
         self._current_service = service
         self._current_scope = scope or service.scope
         self._current_device_id = device_id
@@ -285,7 +506,6 @@ class ServiceDetailPanel(QDockWidget):
         self._apply_service_properties(service)
         self._path_val.setText("-")
 
-        # Trigger data fetching
         self.refresh_unit_file()
         self.refresh_resource_usage()
         self._resource_timer.start()
@@ -294,7 +514,7 @@ class ServiceDetailPanel(QDockWidget):
         self.show()
 
     def update_service_state(self, service: Service) -> None:
-        """Refresh the shown properties after a live change, without reloading the tabs."""
+        """Refresh the shown properties after a live change, without reloading tabs."""
         if self._current_service is None or self._current_service.name != service.name:
             return
         self._current_service = service
@@ -302,34 +522,61 @@ class ServiceDetailPanel(QDockWidget):
 
     def _apply_service_properties(self, service: Service) -> None:
         self._name_val.setText(service.name)
-        self._desc_val.setText(service.description or "(None)")
+        self._desc_val.setText(service.description or "No description provided")
         self._active_val.setText(service.active_state.upper())
         self._sub_state_val.setText(service.sub_state)
         self._load_val.setText(service.load_state)
         self._enabled_val.setText(service.unit_file_state.upper())
         self._scope_val.setText(self._current_scope.upper())
 
-        # Active state coloring
+        palette = get_palette(self._theme)
         active = service.active_state.lower()
         if active == "active":
-            self._active_val.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            fg, bg, br = palette.success_text, palette.success_bg, palette.success_border
         elif active == "failed":
-            self._active_val.setStyleSheet("color: #F44336; font-weight: bold;")
+            fg, bg, br = palette.danger_text, palette.danger_bg, palette.danger_border
         elif active == "inactive":
-            self._active_val.setStyleSheet("color: #9E9E9E; font-weight: bold;")
+            fg, bg, br = palette.muted_text, palette.muted_bg, palette.muted_border
         else:
-            self._active_val.setStyleSheet("color: #FFA726; font-weight: bold;")
+            fg, bg, br = palette.warning_text, palette.warning_bg, palette.warning_border
+        self._active_val.setStyleSheet(
+            f"color: {fg}; background-color: {bg}; border: 1px solid {br}; "
+            "border-radius: 10px; padding: 3px 10px; font-weight: 700; font-size: 11px;"
+        )
 
-        # Enabled state coloring
         enabled = service.unit_file_state.lower()
         if enabled == "enabled":
-            self._enabled_val.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            efg, ebg, ebr = palette.success_text, palette.success_bg, palette.success_border
         elif enabled == "disabled":
-            self._enabled_val.setStyleSheet("color: #F44336; font-weight: bold;")
+            efg, ebg, ebr = palette.danger_text, palette.danger_bg, palette.danger_border
         elif enabled == "masked":
-            self._enabled_val.setStyleSheet("color: #795548; font-weight: bold;")
+            efg, ebg, ebr = palette.masked_text, palette.masked_bg, palette.masked_border
         else:
-            self._enabled_val.setStyleSheet("color: #9E9E9E;")
+            efg, ebg, ebr = palette.muted_text, palette.muted_bg, palette.muted_border
+        self._enabled_val.setStyleSheet(
+            f"color: {efg}; background-color: {ebg}; border: 1px solid {ebr}; "
+            "border-radius: 10px; padding: 3px 10px; font-weight: 700; font-size: 11px;"
+        )
+
+        # Contextual primary actions: show Start when inactive/failed, Stop when active
+        is_running = active in ("active", "activating", "reloading")
+        self._start_btn.setVisible(not is_running)
+        self._stop_btn.setVisible(is_running)
+        self._restart_btn.setVisible(True)
+        self.set_actions_enabled(self._actions_enabled)
+
+    def refresh_theme(self, theme: str) -> None:
+        """Update icons and status pill colors for the active theme."""
+        self._theme = theme
+        palette = get_palette(theme)
+        self._close_btn.setIcon(IconHelper.svg_icon("close", palette.text_secondary))
+        self._more_btn.setIcon(IconHelper.svg_icon("more", palette.text_primary))
+        self._start_btn.setIcon(IconHelper.svg_icon("play", palette.success_text))
+        self._stop_btn.setIcon(IconHelper.svg_icon("stop", palette.danger_text))
+        self._restart_btn.setIcon(IconHelper.svg_icon("restart", palette.text_primary))
+        self._copy_unit_btn.setIcon(IconHelper.svg_icon("copy", palette.text_primary))
+        if self._current_service is not None:
+            self._apply_service_properties(self._current_service)
 
     def refresh_unit_file(self) -> None:
         """Fetch on-disk unit file content asynchronously."""
@@ -346,7 +593,9 @@ class ServiceDetailPanel(QDockWidget):
         def on_success(res: ServiceUnitFile) -> None:
             if not self._current_service or self._current_service.name != service_name:
                 return
-            self._path_val.setText(res.fragment_path or "(Generated/Transient)")
+            path_text = res.fragment_path or "(Generated/Transient)"
+            self._path_val.setText(path_text)
+            self._unit_path_hint.setText(path_text)
             self._unit_file_edit.setPlainText(res.content)
 
         def on_error(msg: str, exc: Any) -> None:
@@ -384,7 +633,6 @@ class ServiceDetailPanel(QDockWidget):
         def on_error(msg: str, exc: Any) -> None:
             if not self._current_service or self._current_service.name != service_name:
                 return
-            # Only update if empty to avoid clobbering existing logs on temporary poll glitch
             if not self._log_edit.toPlainText():
                 self._log_edit.setPlainText(f"# Failed to load logs:\n# {msg}")
 
@@ -487,7 +735,6 @@ class ServiceDetailPanel(QDockWidget):
         if not self._is_current_log_worker(token):
             return
         self._log_worker = None
-        # Fall back to periodic polling (e.g. an older backend without streaming).
         self._log_status.setText(f"Polling every {self._log_timer.interval() // 1000}s")
         self._log_status.setToolTip(f"Live log follow unavailable: {message}")
         self.refresh_service_logs()
@@ -496,7 +743,6 @@ class ServiceDetailPanel(QDockWidget):
     def _on_log_worker_finished(self, token: int) -> None:
         self._retired_workers.pop(token, None)
         if self._is_current_log_worker(token):
-            # The stream ended on its own (journalctl exited); show what we have.
             self._log_worker = None
             self._log_status.setText("Stopped")
 
@@ -551,7 +797,6 @@ class ServiceDetailPanel(QDockWidget):
 
             now = time.time()
 
-            # Running since & uptime
             if res.active_enter_timestamp and res.active_state == "active":
                 self._running_since_val.setText(format_running_since(res.active_enter_timestamp))
                 uptime_sec = max(0.0, now - (res.active_enter_timestamp / 1_000_000))
@@ -560,15 +805,13 @@ class ServiceDetailPanel(QDockWidget):
                 self._running_since_val.setText("N/A")
                 self._uptime_val.setText("N/A")
 
-            # Memory
             if res.memory_current_bytes is not None:
                 self._mem_val.setText(format_bytes(res.memory_current_bytes))
             else:
                 self._mem_val.setText("N/A")
 
-            # Processes & Threads
             if res.main_pid is not None and res.main_pid > 0:
-                self._procs_val.setText(f"1 (PID: {res.main_pid})")
+                self._procs_val.setText(f"PID {res.main_pid}")
             else:
                 self._procs_val.setText("N/A")
 
@@ -577,7 +820,6 @@ class ServiceDetailPanel(QDockWidget):
             else:
                 self._threads_val.setText("N/A")
 
-            # Rate calculations (CPU, Disk Read, Disk Write)
             elapsed_sec = (now - self._previous_sample_time) if self._previous_sample_time else 0.0
 
             if (
@@ -607,8 +849,7 @@ class ServiceDetailPanel(QDockWidget):
                     if res.disk_read_bytes >= self._previous_read_bytes
                     else 0
                 )
-                rate = read_delta / elapsed_sec
-                self._disk_read_val.setText(f"{format_bytes(rate)}/s")
+                self._disk_read_val.setText(f"{format_bytes(read_delta / elapsed_sec)}/s")
             elif res.disk_read_bytes is not None:
                 self._disk_read_val.setText(format_bytes(res.disk_read_bytes))
             else:
@@ -624,14 +865,12 @@ class ServiceDetailPanel(QDockWidget):
                     if res.disk_write_bytes >= self._previous_write_bytes
                     else 0
                 )
-                rate = write_delta / elapsed_sec
-                self._disk_write_val.setText(f"{format_bytes(rate)}/s")
+                self._disk_write_val.setText(f"{format_bytes(write_delta / elapsed_sec)}/s")
             elif res.disk_write_bytes is not None:
                 self._disk_write_val.setText(format_bytes(res.disk_write_bytes))
             else:
                 self._disk_write_val.setText("N/A")
 
-            # Store previous values for next interval
             self._previous_cpu_ns = res.cpu_usage_nsec
             self._previous_read_bytes = res.disk_read_bytes
             self._previous_write_bytes = res.disk_write_bytes

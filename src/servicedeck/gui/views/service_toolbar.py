@@ -1,79 +1,44 @@
-"""Toolbar widget containing service lifecycle controls, search, scope toggle, and host selector."""
+"""Workspace header bar with context title, live status badge, search, and filter chips."""
 
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
+    QButtonGroup,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
-    QSizePolicy,
-    QToolBar,
+    QPushButton,
+    QVBoxLayout,
     QWidget,
 )
 
-from servicedeck.api_client.models.remote import RemoteDevice
 from servicedeck.gui.resources.icon_helper import IconHelper
+from servicedeck.gui.resources.theme import get_palette
 
 
-class ServiceToolbar(QToolBar):
-    """Toolbar providing actions for service management, filtering, scope, and target host selection."""
+class ServiceToolbar(QWidget):
+    """Clean two-row header containing context, primary CTAs, search, and status filter chips."""
 
     search_text_changed = Signal(str)
     active_state_filter_changed = Signal(str)
-    system_mode_toggled = Signal(bool)
-    target_host_changed = Signal(object)  # None for local, or device_id (str)
-    add_host_requested = Signal()
-    manage_hosts_requested = Signal()
+    refresh_requested = Signal()
+    create_requested = Signal()
 
     def __init__(self, parent: Any = None, is_dark: bool = True) -> None:
-        super().__init__("Service Actions", parent)
-        self.setObjectName("serviceToolbar")
-        self.setMovable(False)
-        self.setIconSize(QSize(20, 20))
-        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        super().__init__(parent)
+        self.setObjectName("workspaceHeader")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._is_dark = is_dark
-        self._current_device_id: str | None = None
+        self._refresh_action = QAction("Refresh", self)
+        self._create_action = QAction("New Service", self)
+        self._refresh_action.triggered.connect(self.refresh_requested.emit)
+        self._create_action.triggered.connect(self.create_requested.emit)
 
-        self._setup_actions()
-        self.addSeparator()
-        self._setup_search_and_filters()
-        self.refresh_icons(is_dark=self._is_dark)
-
-    @property
-    def start_action(self) -> QAction:
-        return self._start_action
-
-    @property
-    def stop_action(self) -> QAction:
-        return self._stop_action
-
-    @property
-    def restart_action(self) -> QAction:
-        return self._restart_action
-
-    @property
-    def enable_action(self) -> QAction:
-        return self._enable_action
-
-    @property
-    def disable_action(self) -> QAction:
-        return self._disable_action
-
-    @property
-    def mask_action(self) -> QAction:
-        return self._mask_action
-
-    @property
-    def unmask_action(self) -> QAction:
-        return self._unmask_action
-
-    @property
-    def reload_action(self) -> QAction:
-        return self._reload_action
+        self._setup_ui()
+        self.refresh_icons(is_dark=is_dark)
 
     @property
     def refresh_action(self) -> QAction:
@@ -84,196 +49,133 @@ class ServiceToolbar(QToolBar):
         return self._create_action
 
     @property
-    def system_toggle(self) -> QCheckBox:
-        return self._system_toggle
+    def search_edit(self) -> QLineEdit:
+        return self._search_edit
 
     @property
-    def host_combo(self) -> QComboBox:
-        return self._host_combo
+    def live_label(self) -> QLabel:
+        return self._live_label
 
-    def _setup_actions(self) -> None:
-        self._start_action = self.addAction("Start")
-        self._stop_action = self.addAction("Stop")
-        self._restart_action = self.addAction("Restart")
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 14, 20, 12)
+        layout.setSpacing(12)
 
-        self.addSeparator()
+        # ─── Row 1: Context Title + Live Badge + Global CTAs ───
+        top_row = QHBoxLayout()
+        top_row.setSpacing(12)
 
-        self._enable_action = self.addAction("Enable")
-        self._disable_action = self.addAction("Disable")
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
 
-        self.addSeparator()
+        title_line = QHBoxLayout()
+        title_line.setSpacing(10)
 
-        self._mask_action = self.addAction("Mask")
-        self._unmask_action = self.addAction("Unmask")
+        self._context_title = QLabel("Local System", self)
+        self._context_title.setObjectName("contextTitle")
+        title_line.addWidget(self._context_title)
 
-        self.addSeparator()
+        self._live_label = QLabel("○ Offline", self)
+        self._live_label.setObjectName("liveIndicator")
+        title_line.addWidget(self._live_label)
+        title_line.addStretch()
 
-        self._reload_action = self.addAction("Reload Daemon")
-        self._refresh_action = self.addAction("Refresh")
-        self._create_action = self.addAction("Create Service")
+        title_col.addLayout(title_line)
 
-        self._start_action.setToolTip("Start the selected service")
-        self._stop_action.setToolTip("Stop the selected service")
-        self._restart_action.setToolTip("Restart the selected service")
-        self._enable_action.setToolTip("Enable the selected service at boot")
-        self._disable_action.setToolTip("Disable the selected service at boot")
-        self._mask_action.setToolTip("Mask the selected service (prevent starting)")
-        self._unmask_action.setToolTip("Unmask the selected service")
-        self._reload_action.setToolTip("Reload systemd daemon configuration")
-        self._refresh_action.setToolTip("Refresh the service list")
-        self._create_action.setToolTip("Create a new systemd service unit")
+        self._context_subtitle = QLabel("User Services", self)
+        self._context_subtitle.setObjectName("contextSubtitle")
+        title_col.addWidget(self._context_subtitle)
 
-        self.set_actions_enabled(False)
+        top_row.addLayout(title_col, 1)
 
-    def _setup_search_and_filters(self) -> None:
-        # Search label & input
-        search_label = QLabel("Search: ", self)
-        self.addWidget(search_label)
+        self._refresh_btn = QPushButton("Refresh", self)
+        self._refresh_btn.setObjectName("iconBtn")
+        self._refresh_btn.setIconSize(QSize(15, 15))
+        self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_btn.setToolTip("Refresh service list (F5)")
+        self._refresh_btn.clicked.connect(self._refresh_action.trigger)
+        top_row.addWidget(self._refresh_btn)
+
+        self._create_btn = QPushButton("New Service", self)
+        self._create_btn.setObjectName("primary")
+        self._create_btn.setIconSize(QSize(15, 15))
+        self._create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._create_btn.setToolTip("Create a new systemd service unit")
+        self._create_btn.clicked.connect(self._create_action.trigger)
+        top_row.addWidget(self._create_btn)
+
+        layout.addLayout(top_row)
+
+        # ─── Row 2: Search Input + Summary Filter Chips ───
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
 
         self._search_edit = QLineEdit(self)
         self._search_edit.setObjectName("searchEdit")
-        self._search_edit.setPlaceholderText("Filter by name...")
-        self._search_edit.setMinimumWidth(180)
-        self._search_edit.setMaximumWidth(280)
+        self._search_edit.setPlaceholderText("Search services by name or description... (Ctrl+F)")
         self._search_edit.setClearButtonEnabled(True)
-        self.addWidget(self._search_edit)
-
-        spacer = QWidget()
-        spacer.setFixedWidth(10)
-        spacer.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.addWidget(spacer)
-
+        self._search_edit.setMinimumWidth(240)
         self._search_edit.textChanged.connect(self.search_text_changed.emit)
+        filter_row.addWidget(self._search_edit, 1)
 
-        # Status filter label & combo
-        filter_label = QLabel("Status: ", self)
-        self.addWidget(filter_label)
+        self._chip_group = QButtonGroup(self)
+        self._chip_group.setExclusive(True)
 
-        self._filter_combo = QComboBox(self)
-        self._filter_combo.setObjectName("filterCombo")
-        self._filter_combo.addItem("All", "")
-        self._filter_combo.addItem("Active", "active")
-        self._filter_combo.addItem("Inactive", "inactive")
-        self._filter_combo.addItem("Failed", "failed")
-        self._filter_combo.setMinimumWidth(90)
-        self._filter_combo.setMaximumWidth(150)
-        self._filter_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.addWidget(self._filter_combo)
+        self._chips: dict[str, QPushButton] = {}
+        chip_specs = [
+            ("", "All", "filterChip"),
+            ("active", "Active", "filterChip"),
+            ("failed", "Failed", "filterChipFailed"),
+            ("inactive", "Inactive", "filterChip"),
+        ]
+        for state_key, label, obj_name in chip_specs:
+            chip = QPushButton(label, self)
+            chip.setObjectName(obj_name)
+            chip.setCheckable(True)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            if state_key == "":
+                chip.setChecked(True)
+            chip.clicked.connect(
+                lambda _checked=False, sk=state_key: self.active_state_filter_changed.emit(sk)
+            )
+            self._chip_group.addButton(chip)
+            self._chips[state_key] = chip
+            filter_row.addWidget(chip)
 
-        self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
+        layout.addLayout(filter_row)
 
-        self.addSeparator()
+    def set_context(self, host_label: str, scope: str) -> None:
+        """Update context header text."""
+        self._context_title.setText(host_label)
+        scope_text = "System Services" if scope == "system" else "User Services"
+        self._context_subtitle.setText(scope_text)
 
-        # Scope checkbox (unchecked = user, checked = system)
-        self._system_toggle = QCheckBox("System Services", self)
-        self._system_toggle.setObjectName("systemToggle")
-        self.addWidget(self._system_toggle)
+    def update_counts(self, counts: dict[str, int]) -> None:
+        """Update the live count badges on the status filter chips."""
+        self._chips[""].setText(f"All  {counts.get('all', 0)}")
+        self._chips["active"].setText(f"Active  {counts.get('active', 0)}")
+        self._chips["failed"].setText(f"Failed  {counts.get('failed', 0)}")
+        self._chips["inactive"].setText(f"Inactive  {counts.get('inactive', 0)}")
 
-        self._system_toggle.toggled.connect(self.system_mode_toggled.emit)
+    def set_live_status(self, connected: bool, tooltip: str) -> None:
+        """Update the header live connection badge."""
+        palette = get_palette("dark" if self._is_dark else "light")
+        self._live_label.setText("● Live" if connected else "○ Reconnecting")
+        color = palette.success_text if connected else palette.muted_text
+        self._live_label.setStyleSheet(f"color: {color};")
+        self._live_label.setToolTip(tooltip)
 
-        self.addSeparator()
+    def focus_search(self) -> None:
+        """Focus the search field and select its text."""
+        self._search_edit.setFocus()
+        self._search_edit.selectAll()
 
-        # Host Selector label & combo
-        host_label = QLabel("Host: ", self)
-        self.addWidget(host_label)
-
-        self._host_combo = QComboBox(self)
-        self._host_combo.setObjectName("hostCombo")
-        self._host_combo.setMinimumWidth(160)
-        self._host_combo.setMaximumWidth(260)
-        self._host_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._host_combo.addItem("🖥️ Local System", None)
-        self._host_combo.addItem("+ Add Remote Host...", "__add_host__")
-        self.addWidget(self._host_combo)
-
-        self._host_combo.currentIndexChanged.connect(self._on_host_combo_changed)
-
-    def set_hosts(self, devices: list[RemoteDevice], current_device_id: str | None = None) -> None:
-        """Update host dropdown options with local and remote machines."""
-        self._current_device_id = current_device_id
-        self._host_combo.blockSignals(True)
-        self._host_combo.clear()
-
-        # 1. Local
-        self._host_combo.addItem("🖥️ Local System", None)
-
-        # 2. Remote devices
-        for d in devices:
-            status_icon = "🟢" if d.connected else "⚪"
-            label = f"{status_icon} {d.display_name} ({d.hostname})"
-            self._host_combo.addItem(label, d.id)
-
-        # 3. Actions
-        self._host_combo.insertSeparator(self._host_combo.count())
-        self._host_combo.addItem("+ Add Remote Host...", "__add_host__")
-        if devices:
-            self._host_combo.addItem("⚙️ Manage Remote Hosts...", "__manage_hosts__")
-
-        # Select current
-        target_idx = 0
-        if current_device_id is not None:
-            for i in range(self._host_combo.count()):
-                if self._host_combo.itemData(i) == current_device_id:
-                    target_idx = i
-                    break
-        self._host_combo.setCurrentIndex(target_idx)
-        self._host_combo.blockSignals(False)
-
-    def _on_host_combo_changed(self, index: int) -> None:
-        data = self._host_combo.itemData(index)
-        if data == "__add_host__":
-            # Revert selection to current
-            self._restore_current_host_index()
-            self.add_host_requested.emit()
-            return
-
-        if data == "__manage_hosts__":
-            self._restore_current_host_index()
-            self.manage_hosts_requested.emit()
-            return
-
-        self._current_device_id = data
-        self.target_host_changed.emit(data)
-
-    def _restore_current_host_index(self) -> None:
-        """Keep the combo visually on the active host when action items are clicked."""
-        self._host_combo.blockSignals(True)
-        target_idx = 0
-        for i in range(self._host_combo.count()):
-            if self._host_combo.itemData(i) == self._current_device_id:
-                target_idx = i
-                break
-        self._host_combo.setCurrentIndex(target_idx)
-        self._host_combo.blockSignals(False)
-
-    def _on_filter_changed(self, index: int) -> None:
-        state_data = self._filter_combo.itemData(index) or ""
-        self.active_state_filter_changed.emit(str(state_data))
-
-    def set_actions_enabled(self, enabled: bool) -> None:
-        """Enable or disable row-specific actions (start, stop, restart, enable, disable)."""
-        self._start_action.setEnabled(enabled)
-        self._stop_action.setEnabled(enabled)
-        self._restart_action.setEnabled(enabled)
-        self._enable_action.setEnabled(enabled)
-        self._disable_action.setEnabled(enabled)
-        self._mask_action.setEnabled(enabled)
-        self._unmask_action.setEnabled(enabled)
-
-    def refresh_icons(self, is_dark: bool = True) -> None:
-        """Refresh action icons according to active light/dark theme."""
+    def refresh_icons(self, is_dark: bool) -> None:
+        """Refresh button icons to match the active theme."""
         self._is_dark = is_dark
-        neutral_color = QColor("#e5e9f0") if is_dark else QColor("#2d3748")
-        success_color = QColor("#81C784") if is_dark else QColor("#2E7D32")
-        danger_color = QColor("#E57373") if is_dark else QColor("#C62828")
+        palette = get_palette("dark" if is_dark else "light")
+        self._refresh_btn.setIcon(IconHelper.svg_icon("refresh", palette.text_primary))
+        self._create_btn.setIcon(IconHelper.svg_icon("plus", palette.on_accent))
 
-        self._start_action.setIcon(IconHelper.tinted_icon("media-playback-start", success_color))
-        self._stop_action.setIcon(IconHelper.tinted_icon("media-playback-stop", danger_color))
-        self._restart_action.setIcon(IconHelper.tinted_icon("view-refresh", neutral_color))
-        self._enable_action.setIcon(IconHelper.tinted_icon("emblem-default", success_color))
-        self._disable_action.setIcon(IconHelper.tinted_icon("process-stop", danger_color))
-        self._mask_action.setIcon(IconHelper.tinted_icon("object-locked", danger_color))
-        self._unmask_action.setIcon(IconHelper.tinted_icon("object-unlocked", neutral_color))
-        self._reload_action.setIcon(IconHelper.tinted_icon("view-refresh", neutral_color))
-        self._refresh_action.setIcon(IconHelper.tinted_icon("view-refresh", neutral_color))
-        self._create_action.setIcon(IconHelper.tinted_icon("document-new", neutral_color))
+
+ServiceHeaderBar = ServiceToolbar
