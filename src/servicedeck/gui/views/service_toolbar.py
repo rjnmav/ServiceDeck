@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -132,6 +133,7 @@ class ServiceToolbar(QWidget):
             chip = QPushButton(label, self)
             chip.setObjectName(obj_name)
             chip.setCheckable(True)
+            chip.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             chip.setCursor(Qt.CursorShape.PointingHandCursor)
             if state_key == "":
                 chip.setChecked(True)
@@ -156,6 +158,11 @@ class ServiceToolbar(QWidget):
         self._chips["active"].setText(f"Active  {counts.get('active', 0)}")
         self._chips["failed"].setText(f"Failed  {counts.get('failed', 0)}")
         self._chips["inactive"].setText(f"Inactive  {counts.get('inactive', 0)}")
+        for chip in self._chips.values():
+            chip.adjustSize()
+            chip.updateGeometry()
+        if self.layout() is not None:
+            self.layout().activate()
 
     def set_live_status(self, connected: bool, tooltip: str) -> None:
         """Update the header live connection badge."""
@@ -164,6 +171,14 @@ class ServiceToolbar(QWidget):
         color = palette.success_text if connected else palette.muted_text
         self._live_label.setStyleSheet(f"color: {color};")
         self._live_label.setToolTip(tooltip)
+
+    def clear_filters(self) -> None:
+        """Empty the search box and select the "All" chip, notifying listeners."""
+        self._search_edit.clear()  # emits search_text_changed("") when it had text
+        all_chip = self._chips[""]
+        if not all_chip.isChecked():
+            all_chip.setChecked(True)
+        self.active_state_filter_changed.emit("")
 
     def focus_search(self) -> None:
         """Focus the search field and select its text."""

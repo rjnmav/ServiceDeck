@@ -72,6 +72,12 @@ _SVG_PATHS: dict[str, str] = {
     "chevron-down": '<polyline points="6 9 12 15 18 9"/>',
     "chevron-right": '<polyline points="9 18 15 12 9 6"/>',
     "terminal": ('<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>'),
+    "edit": ('<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>'),
+    "bell": (
+        '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>'
+        '<path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>'
+    ),
+    "undo": ('<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/>'),
 }
 
 # Map legacy freedesktop theme names to our bundled SVG names so existing callers stay crisp.

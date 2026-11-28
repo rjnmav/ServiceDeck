@@ -15,6 +15,7 @@ from servicedeck.backend.models.service import (
     normalize_service_name,
     validate_scope,
 )
+from servicedeck.backend.models.unit_files import DEFAULT_DROP_IN, OverrideResult, UnitFileInfo
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,35 @@ class ServiceManager:
         clean_name = normalize_service_name(name)
         logger.debug("[%s] Getting unit file for '%s'", target_scope, clean_name)
         return await self._adapter.get_unit_file(clean_name, scope=target_scope)
+
+    async def get_unit_info(self, name: str, scope: str | None = None) -> UnitFileInfo:
+        """Retrieve the unit's main file plus drop-ins in the resolved scope."""
+        target_scope = self.resolve_scope(scope)
+        clean_name = normalize_service_name(name)
+        logger.debug("[%s] Getting unit files for '%s'", target_scope, clean_name)
+        return await self._adapter.get_unit_info(clean_name, scope=target_scope)
+
+    async def write_override(
+        self,
+        name: str,
+        content: str,
+        scope: str | None = None,
+        drop_in: str = DEFAULT_DROP_IN,
+    ) -> OverrideResult:
+        """Write a drop-in override for a service in the resolved scope and reload."""
+        target_scope = self.resolve_scope(scope)
+        clean_name = normalize_service_name(name)
+        logger.info("[%s] Writing drop-in '%s' for '%s'", target_scope, drop_in, clean_name)
+        return await self._adapter.write_override(
+            clean_name, content=content, scope=target_scope, drop_in=drop_in
+        )
+
+    async def revert_overrides(self, name: str, scope: str | None = None) -> list[str]:
+        """Remove a service's writable drop-ins in the resolved scope and reload."""
+        target_scope = self.resolve_scope(scope)
+        clean_name = normalize_service_name(name)
+        logger.info("[%s] Reverting drop-ins for '%s'", target_scope, clean_name)
+        return await self._adapter.revert_overrides(clean_name, scope=target_scope)
 
     async def get_service_resources(
         self, name: str, scope: str | None = None

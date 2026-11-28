@@ -31,9 +31,11 @@ from servicedeck.api_client.models.service import (
     ServiceLogs,
     ServiceResources,
     ServiceUnitFile,
+    format_ago,
 )
 from servicedeck.gui.resources.icon_helper import IconHelper
 from servicedeck.gui.resources.theme import get_palette
+from servicedeck.gui.views.unit_highlighter import UnitFileHighlighter
 from servicedeck.gui.workers.service_worker import run_async_task
 from servicedeck.gui.workers.stream_worker import StreamWorker
 
@@ -88,6 +90,12 @@ class ServiceDetailPanel(QWidget):
 
     action_requested = Signal(str)  # start, stop, restart, enable, disable, mask, unmask, reload
     close_requested = Signal()
+    #: The user wants to edit the selected service's drop-in override.
+    edit_override_requested = Signal()
+    #: The user wants to remove the selected service's drop-ins (back to the vendor unit).
+    revert_requested = Signal()
+    #: The "notify me if this service fails" box was toggled by the user.
+    watch_toggled = Signal(bool)
 
     def __init__(
         self,
@@ -107,6 +115,8 @@ class ServiceDetailPanel(QWidget):
         self._current_scope: str = "user"
         self._current_device_id: str | None = None
         self._actions_enabled = True
+        self._unit_file: ServiceUnitFile | None = None
+        self._setting_watch = False
 
         # Previous samples for rate/CPU calculations
         self._previous_cpu_ns: int | None = None
@@ -296,6 +306,58 @@ class ServiceDetailPanel(QWidget):
         res_grid.addWidget(disk_w_card, 3, 1)
         overview_layout.addLayout(res_grid)
 
+        health_heading = QLabel("Health", overview_widget)
+        health_heading.setObjectName("sidebarSectionLabel")
+        overview_layout.addWidget(health_heading)
+
+        health_card = QFrame(overview_widget)
+        health_card.setObjectName("propGroup")
+        health_grid = QGridLayout(health_card)
+        health_grid.setContentsMargins(14, 12, 14, 12)
+        health_grid.setHorizontalSpacing(14)
+        health_grid.setVerticalSpacing(8)
+        health_grid.setColumnStretch(1, 1)
+
+        def make_health_val() -> QLabel:
+            lbl = QLabel("-", health_card)
+            lbl.setObjectName("propVal")
+            lbl.setWordWrap(True)
+            lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            return lbl
+
+        self._restarts_val = make_health_val()
+        self._restarts_val.setToolTip("Automatic restarts by systemd (NRestarts)")
+        self._last_exit_val = make_health_val()
+        self._last_exit_val.setToolTip("How the main process last ended")
+        self._result_val = make_health_val()
+        self._result_val.setToolTip("Outcome of the last run")
+        self._failed_since_val = make_health_val()
+        health_rows: list[tuple[str, QWidget]] = [
+            ("Restarts", self._restarts_val),
+            ("Last Exit", self._last_exit_val),
+            ("Result", self._result_val),
+            ("Failed", self._failed_since_val),
+        ]
+        self._failed_since_key = QLabel("Failed", health_card)
+        for row_idx, (key_text, val_widget) in enumerate(health_rows):
+            key_lbl = (
+                self._failed_since_key if key_text == "Failed" else QLabel(key_text, health_card)
+            )
+            key_lbl.setObjectName("propKey")
+            health_grid.addWidget(key_lbl, row_idx, 0, Qt.AlignmentFlag.AlignTop)
+            health_grid.addWidget(val_widget, row_idx, 1)
+
+        self._watch_check = QCheckBox("Notify me if this service fails", health_card)
+        self._watch_check.setObjectName("watchToggle")
+        self._watch_check.setToolTip(
+            "Show a desktop notification when this service enters the failed state, "
+            "even while another host or scope is shown."
+        )
+        self._watch_check.toggled.connect(self._on_watch_toggled)
+        health_grid.addWidget(self._watch_check, len(health_rows), 0, 1, 2)
+        self._set_failed_row_visible(False)
+        overview_layout.addWidget(health_card)
+
         props_heading = QLabel("Unit Details", overview_widget)
         props_heading.setObjectName("sidebarSectionLabel")
         overview_layout.addWidget(props_heading)
@@ -401,9 +463,31 @@ class ServiceDetailPanel(QWidget):
         unit_layout.setSpacing(8)
 
         unit_bar = QHBoxLayout()
+        unit_bar.setSpacing(6)
         self._unit_path_hint = QLabel("Read-only systemd unit definition", unit_widget)
         self._unit_path_hint.setObjectName("contextSubtitle")
+        self._unit_path_hint.setWordWrap(True)
         unit_bar.addWidget(self._unit_path_hint, 1)
+
+        self._edit_override_btn = QPushButton("Edit", unit_widget)
+        self._edit_override_btn.setObjectName("iconBtn")
+        self._edit_override_btn.setIconSize(QSize(13, 13))
+        self._edit_override_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._edit_override_btn.setToolTip(
+            "Edit a drop-in override (<unit>.d/override.conf), like 'systemctl edit'"
+        )
+        self._edit_override_btn.setEnabled(False)
+        self._edit_override_btn.clicked.connect(self.edit_override_requested.emit)
+        unit_bar.addWidget(self._edit_override_btn)
+
+        self._revert_unit_btn = QPushButton("Revert", unit_widget)
+        self._revert_unit_btn.setObjectName("iconBtn")
+        self._revert_unit_btn.setIconSize(QSize(13, 13))
+        self._revert_unit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._revert_unit_btn.setToolTip("Remove the overrides and use the vendor unit file again")
+        self._revert_unit_btn.setEnabled(False)
+        self._revert_unit_btn.clicked.connect(self.revert_requested.emit)
+        unit_bar.addWidget(self._revert_unit_btn)
 
         self._copy_unit_btn = QPushButton("Copy", unit_widget)
         self._copy_unit_btn.setObjectName("iconBtn")
@@ -413,10 +497,21 @@ class ServiceDetailPanel(QWidget):
         unit_bar.addWidget(self._copy_unit_btn)
         unit_layout.addLayout(unit_bar)
 
+        self._unit_reload_warning = QLabel(
+            "Unit files changed on disk since systemd last reloaded them.", unit_widget
+        )
+        self._unit_reload_warning.setObjectName("dialogBanner")
+        self._unit_reload_warning.setProperty("state", "info")
+        self._unit_reload_warning.setWordWrap(True)
+        self._unit_reload_warning.hide()
+        unit_layout.addWidget(self._unit_reload_warning)
+
         self._unit_file_edit = QTextEdit()
         self._unit_file_edit.setReadOnly(True)
         self._unit_file_edit.setObjectName("unitFileViewer")
         self._unit_file_edit.setFont(mono_font)
+        self._unit_file_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._unit_highlighter = UnitFileHighlighter(self._unit_file_edit.document(), self._theme)
         unit_layout.addWidget(self._unit_file_edit, 1)
         self._tab_widget.addTab(unit_widget, "Unit File")
 
@@ -440,6 +535,34 @@ class ServiceDetailPanel(QWidget):
         self._restart_btn.setEnabled(enabled)
         self._stop_btn.setEnabled(enabled)
         self._more_btn.setEnabled(enabled)
+        self._update_unit_buttons()
+
+    @property
+    def current_unit_file(self) -> ServiceUnitFile | None:
+        """The unit file (with drop-ins) last loaded for the selected service."""
+        return self._unit_file
+
+    @property
+    def current_service(self) -> Service | None:
+        return self._current_service
+
+    @property
+    def current_scope(self) -> str:
+        return self._current_scope
+
+    @property
+    def current_device_id(self) -> str | None:
+        return self._current_device_id
+
+    def _update_unit_buttons(self) -> None:
+        unit = self._unit_file
+        loaded = unit is not None and self._current_service is not None
+        self._edit_override_btn.setEnabled(
+            self._actions_enabled and loaded and bool(unit and unit.override_path)
+        )
+        self._revert_unit_btn.setEnabled(
+            self._actions_enabled and loaded and bool(unit and unit.editable_drop_ins)
+        )
 
     def _show_more_actions(self) -> None:
         if not self._current_service:
@@ -505,6 +628,8 @@ class ServiceDetailPanel(QWidget):
         self.reset_resource_usage_state()
         self._apply_service_properties(service)
         self._path_val.setText("-")
+        self._unit_file = None
+        self._update_unit_buttons()
 
         self.refresh_unit_file()
         self.refresh_resource_usage()
@@ -575,6 +700,10 @@ class ServiceDetailPanel(QWidget):
         self._stop_btn.setIcon(IconHelper.svg_icon("stop", palette.danger_text))
         self._restart_btn.setIcon(IconHelper.svg_icon("restart", palette.text_primary))
         self._copy_unit_btn.setIcon(IconHelper.svg_icon("copy", palette.text_primary))
+        self._edit_override_btn.setIcon(IconHelper.svg_icon("edit", palette.text_primary))
+        self._revert_unit_btn.setIcon(IconHelper.svg_icon("undo", palette.text_primary))
+        if hasattr(self, "_unit_highlighter"):
+            self._unit_highlighter.set_theme(theme)
         if self._current_service is not None:
             self._apply_service_properties(self._current_service)
 
@@ -593,17 +722,33 @@ class ServiceDetailPanel(QWidget):
         def on_success(res: ServiceUnitFile) -> None:
             if not self._current_service or self._current_service.name != service_name:
                 return
-            path_text = res.fragment_path or "(Generated/Transient)"
-            self._path_val.setText(path_text)
-            self._unit_path_hint.setText(path_text)
-            self._unit_file_edit.setPlainText(res.content)
+            self.set_unit_file(res)
 
         def on_error(msg: str, exc: Any) -> None:
             if not self._current_service or self._current_service.name != service_name:
                 return
+            self._unit_file = None
+            self._update_unit_buttons()
             self._unit_file_edit.setPlainText(f"# Failed to load unit file:\n# {msg}")
 
         run_async_task(task, on_success=on_success, on_error=on_error)
+
+    def set_unit_file(self, unit: ServiceUnitFile) -> None:
+        """Show a unit file with its drop-ins (``systemctl cat`` style)."""
+        self._unit_file = unit
+        path_text = unit.fragment_path or "(Generated/Transient)"
+        self._path_val.setText(path_text)
+        count = len(unit.drop_ins)
+        if count:
+            editable = len(unit.editable_drop_ins)
+            noun = "drop-in" if count == 1 else "drop-ins"
+            extra = f" ({editable} override{'s' if editable != 1 else ''})" if editable else ""
+            self._unit_path_hint.setText(f"{path_text}  +  {count} {noun}{extra}")
+        else:
+            self._unit_path_hint.setText(path_text)
+        self._unit_reload_warning.setVisible(unit.need_daemon_reload)
+        self._unit_file_edit.setPlainText(unit.effective_text() if unit.drop_ins else unit.content)
+        self._update_unit_buttons()
 
     def refresh_service_logs(self) -> None:
         """Fetch recent journal logs asynchronously."""
@@ -796,6 +941,7 @@ class ServiceDetailPanel(QWidget):
                 return
 
             now = time.time()
+            self.apply_health(res, now)
 
             if res.active_enter_timestamp and res.active_state == "active":
                 self._running_since_val.setText(format_running_since(res.active_enter_timestamp))
@@ -881,6 +1027,55 @@ class ServiceDetailPanel(QWidget):
 
         run_async_task(task, on_success=on_success, on_error=on_error)
 
+    def _set_failed_row_visible(self, visible: bool) -> None:
+        self._failed_since_key.setVisible(visible)
+        self._failed_since_val.setVisible(visible)
+
+    def _on_watch_toggled(self, checked: bool) -> None:
+        if not self._setting_watch:
+            self.watch_toggled.emit(checked)
+
+    def set_watched(self, watched: bool) -> None:
+        """Reflect whether the shown service is watched, without emitting ``watch_toggled``."""
+        self._setting_watch = True
+        try:
+            self._watch_check.setChecked(watched)
+        finally:
+            self._setting_watch = False
+
+    @property
+    def is_watched(self) -> bool:
+        return self._watch_check.isChecked()
+
+    def apply_health(self, res: ServiceResources, now: float | None = None) -> None:
+        """Show restart count, last exit and failure time from a resources sample."""
+        palette = get_palette(self._theme)
+        if res.n_restarts is None:
+            self._restarts_val.setText("N/A")
+            self._restarts_val.setStyleSheet("")
+        else:
+            self._restarts_val.setText(str(res.n_restarts))
+            self._restarts_val.setStyleSheet(
+                f"color: {palette.warning_text}; font-weight: 700;" if res.n_restarts else ""
+            )
+        self._last_exit_val.setText(res.last_exit or "-")
+        result = res.result or "-"
+        self._result_val.setText(result)
+        self._result_val.setStyleSheet(
+            f"color: {palette.danger_text}; font-weight: 700;"
+            if res.result and res.result != "success"
+            else ""
+        )
+        failed_for = res.failed_for_seconds(now)
+        if failed_for is None:
+            self._set_failed_row_visible(False)
+            self._failed_since_val.setText("-")
+        else:
+            since = format_running_since(res.state_change_timestamp)
+            self._failed_since_val.setText(f"{format_ago(failed_for)} ago (since {since})")
+            self._failed_since_val.setStyleSheet(f"color: {palette.danger_text};")
+            self._set_failed_row_visible(True)
+
     def reset_resource_usage_state(self) -> None:
         """Reset metric state and previous samples."""
         self._running_since_val.setText("-")
@@ -891,6 +1086,10 @@ class ServiceDetailPanel(QWidget):
         self._disk_write_val.setText("-")
         self._procs_val.setText("-")
         self._threads_val.setText("-")
+        for health_val in (self._restarts_val, self._last_exit_val, self._result_val):
+            health_val.setText("-")
+            health_val.setStyleSheet("")
+        self._set_failed_row_visible(False)
         self._previous_cpu_ns = None
         self._previous_read_bytes = None
         self._previous_write_bytes = None
@@ -917,6 +1116,9 @@ class ServiceDetailPanel(QWidget):
         self._path_val.setText("-")
         self._scope_val.setText("-")
         self._unit_file_edit.clear()
+        self._unit_file = None
+        self._unit_reload_warning.hide()
+        self._update_unit_buttons()
         self.clear_log_view()
         self._log_status.setText("")
         self._log_status.setToolTip("")

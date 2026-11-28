@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
 
     client = ServiceDeckClient(base_url=args.url)
     window = MainWindow(client=client)
-    window.showMaximized()
+    window.show_initial()
 
     return app.exec()
 

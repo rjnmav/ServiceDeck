@@ -10,12 +10,14 @@ from fastapi.responses import JSONResponse
 
 from servicedeck.backend.api.router import api_router
 from servicedeck.backend.config.settings import Settings, get_settings
+from servicedeck.backend.core.local_admin import LocalAdminSession
 from servicedeck.backend.core.remote_manager import RemoteManager
 from servicedeck.backend.core.service_manager import ServiceManager
 from servicedeck.backend.exceptions import (
     AuthenticationRequiredError,
     AuthorizationDeniedError,
     InvalidServiceNameError,
+    LocalElevationRequiredError,
     PermissionDeniedError,
     PolkitAgentUnavailableError,
     RemoteAuthorizationMissingError,
@@ -46,6 +48,7 @@ def create_app(
     settings: Settings | None = None,
     service_manager: ServiceManager | None = None,
     remote_manager: RemoteManager | None = None,
+    local_admin: LocalAdminSession | None = None,
 ) -> FastAPI:
     """Create and configure a new FastAPI application instance."""
     app_settings = settings or get_settings()
@@ -107,6 +110,8 @@ def create_app(
         logger.info("Shutting down %s", app_settings.app_name)
         if hasattr(app.state, "remote_manager") and app.state.remote_manager is not None:
             await app.state.remote_manager.disconnect_all()
+        if getattr(app.state, "local_admin", None) is not None:
+            await app.state.local_admin.close()
         await connection_manager.disconnect()
 
     app = FastAPI(
@@ -120,6 +125,10 @@ def create_app(
         app.state.service_manager = service_manager
     if remote_manager is not None:
         app.state.remote_manager = remote_manager
+    # No I/O until elevated, so it is created eagerly (tests without a lifespan can use it).
+    app.state.local_admin = local_admin or LocalAdminSession(
+        idle_timeout=app_settings.local_admin_idle_timeout
+    )
 
     # Register API routes
     app.include_router(api_router)
@@ -206,6 +215,19 @@ def create_app(
             status_code=status.HTTP_403_FORBIDDEN,
             content=ErrorDetail(
                 error="RemoteElevationRequiredError",
+                message=exc.message,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(LocalElevationRequiredError)
+    async def local_elevation_required_handler(
+        request: Request, exc: LocalElevationRequiredError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content=ErrorDetail(
+                error="LocalElevationRequiredError",
                 message=exc.message,
                 details=exc.details,
             ).model_dump(),

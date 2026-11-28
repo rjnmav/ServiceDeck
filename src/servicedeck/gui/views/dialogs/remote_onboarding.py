@@ -24,6 +24,9 @@ HOST_KEY_UNKNOWN = "RemoteHostKeyUnknownError"
 HOST_KEY_CHANGED = "RemoteHostKeyChangedError"
 AUTH_FAILED = "SSHAuthenticationError"
 ELEVATION_REQUIRED = "RemoteElevationRequiredError"
+LOCAL_ELEVATION_REQUIRED = "LocalElevationRequiredError"
+#: ``target`` used for administrator access on this computer (``device_id`` is ``None``).
+LOCAL_TARGET = "this computer"
 SUDO_AUTH_FAILED = "RemoteSudoAuthError"
 SUDO_UNAVAILABLE = "RemoteSudoUnavailableError"
 
@@ -85,11 +88,19 @@ def show_changed_host_key(parent: QWidget | None, message: str) -> None:
 
 def ask_sudo_password(parent: QWidget | None, target: str, retry_message: str | None) -> str | None:
     """Ask for the remote sudo password; ``None`` if the user cancels."""
-    label = (
-        f"Managing system services on <b>{target}</b> needs administrator access.<br><br>"
-        "Enter your sudo password for that machine. It is used once to start an "
-        "administrator session that lasts until you disconnect, and is <b>not</b> saved."
-    )
+    if target == LOCAL_TARGET:
+        label = (
+            "Changing system unit files on <b>this computer</b> needs administrator "
+            "access.<br><br>Enter your sudo password. It is used once to start an "
+            "administrator session that ends when you drop it or after a while without use, "
+            "and is <b>not</b> saved."
+        )
+    else:
+        label = (
+            f"Managing system services on <b>{target}</b> needs administrator access.<br><br>"
+            "Enter your sudo password for that machine. It is used once to start an "
+            "administrator session that lasts until you disconnect, and is <b>not</b> saved."
+        )
     if retry_message:
         label = f"<span style='color:#e03131'>{retry_message}</span><br><br>{label}"
     password, ok = QInputDialog.getText(
@@ -102,7 +113,7 @@ def show_sudo_unavailable(parent: QWidget | None, message: str) -> None:
     QMessageBox.warning(
         parent,
         "Administrator Access Unavailable",
-        f"{message}<br><br>The remote account must be allowed to use <code>sudo</code> "
+        f"{message}<br><br>The account must be allowed to use <code>sudo</code> "
         "(for example, be in the <code>wheel</code> or <code>sudo</code> group).",
     )
 
@@ -202,13 +213,13 @@ def handle_onboarding_error(
 
 def needs_elevation(exc: Any) -> bool:
     """True if ``exc`` means a system-scope action needs administrator access."""
-    return _error_type(exc) == ELEVATION_REQUIRED
+    return _error_type(exc) in (ELEVATION_REQUIRED, LOCAL_ELEVATION_REQUIRED)
 
 
 def handle_elevation_error(
     parent: QWidget | None,
     client: ServiceDeckClient,
-    device_id: str,
+    device_id: str | None,
     exc: Any,
     *,
     target: str,
@@ -218,6 +229,7 @@ def handle_elevation_error(
 ) -> bool:
     """Get administrator access for ``device_id`` interactively, then ``retry()``.
 
+    ``device_id=None`` means this computer (a local root agent for system unit files).
     Passwordless sudo is tried first, so ``NOPASSWD`` setups never see a prompt. Returns
     False (and does nothing) if ``exc`` is not an elevation request.
     """
@@ -246,9 +258,12 @@ def handle_elevation_error(
                 return
             on_give_up(msg)
 
-        run_async_task(
-            client.elevate_device, device_id, password, on_success=succeeded, on_error=failed
-        )
+        if device_id is None:
+            run_async_task(client.elevate_local, password, on_success=succeeded, on_error=failed)
+        else:
+            run_async_task(
+                client.elevate_device, device_id, password, on_success=succeeded, on_error=failed
+            )
 
     elevate(None, 0)
     return True

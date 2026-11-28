@@ -12,6 +12,8 @@ from servicedeck.api_client.models.remote import (
 from servicedeck.api_client.models.service import (
     CreatedService,
     DaemonReloadResult,
+    OverrideResult,
+    RevertResult,
     Service,
     ServiceLogs,
     ServiceOperationResult,
@@ -353,6 +355,61 @@ class AsyncServiceDeckClient:
         endpoint = self._resolve_path("/services/create", device_id=device_id)
         data = await self.transport.request("POST", endpoint, json=payload)
         return CreatedService.from_dict(data)
+
+    async def write_override(
+        self,
+        name: str,
+        content: str,
+        scope: str | None = None,
+        drop_in: str = "override.conf",
+        device_id: str | None = None,
+    ) -> OverrideResult:
+        """Write a drop-in override (``systemctl edit``) and reload systemd.
+
+        Comment-only content removes the drop-in. If systemd rejects the result, the
+        backend restores the previous file and raises ``ServiceOperationError``.
+        """
+        params = {"scope": scope} if scope is not None else None
+        endpoint = self._resolve_path(f"/services/{name}/override", device_id=device_id)
+        data = await self.transport.request(
+            "PUT", endpoint, params=params, json={"content": content, "drop_in": drop_in}
+        )
+        return OverrideResult.from_dict(data)
+
+    async def revert_overrides(
+        self,
+        name: str,
+        scope: str | None = None,
+        device_id: str | None = None,
+    ) -> RevertResult:
+        """Delete the unit's editable drop-ins (back to the vendor unit) and reload."""
+        params = {"scope": scope} if scope is not None else None
+        endpoint = self._resolve_path(f"/services/{name}/override", device_id=device_id)
+        data = await self.transport.request("DELETE", endpoint, params=params)
+        return RevertResult.from_dict(data)
+
+    # --- Administrator access on this computer ---
+
+    async def get_local_elevation(self) -> bool:
+        """Whether system unit file changes on this computer currently run as root."""
+        data = await self.transport.request("GET", "/api/elevation")
+        return bool(data.get("elevated", False))
+
+    async def elevate_local(self, password: str | None = None) -> bool:
+        """Get administrator access on this computer (local root agent via sudo).
+
+        The password goes only to the local backend, which answers sudo once and never
+        stores it. ``None`` tries passwordless sudo.
+        """
+        body = {"password": password} if password is not None else {}
+        data = await self.transport.request(
+            "POST", "/api/elevation", json=body, timeout=ONBOARDING_TIMEOUT
+        )
+        return bool(data.get("elevated", False))
+
+    async def drop_local_elevation(self) -> None:
+        """Stop the local root agent; system unit file changes need the password again."""
+        await self.transport.request("DELETE", "/api/elevation")
 
     async def close(self) -> None:
         """Close the underlying transport resources."""

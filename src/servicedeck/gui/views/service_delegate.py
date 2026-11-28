@@ -7,6 +7,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from servicedeck.gui.models.service_model import ServiceTableModel
+from servicedeck.gui.resources.icon_helper import IconHelper
 from servicedeck.gui.resources.theme import DARK_PALETTE, ThemePalette, get_palette
 
 
@@ -97,6 +98,17 @@ class ServiceItemDelegate(QStyledItemDelegate):
         rect = option.rect.adjusted(16, 8, -12, -8)
         name = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
         desc = str(index.data(ServiceTableModel.ROLE_DESCRIPTION) or "")
+        if index.data(ServiceTableModel.ROLE_WATCHED):
+            # Watched for failures: a small bell at the right edge of the cell.
+            bell_size = 14
+            bell_rect = QRect(
+                rect.right() - bell_size + 1,
+                rect.top() + 2,
+                bell_size,
+                bell_size,
+            )
+            IconHelper.svg_icon("bell", self._palette.warning_text).paint(painter, bell_rect)
+            rect = rect.adjusted(0, 0, -(bell_size + 6), 0)
 
         name_font = QFont(option.font)
         name_font.setWeight(QFont.Weight.DemiBold)

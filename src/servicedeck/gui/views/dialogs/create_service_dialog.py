@@ -30,9 +30,11 @@ from servicedeck.api_client.models.service import CreatedService
 from servicedeck.gui.resources.icon_helper import IconHelper
 from servicedeck.gui.resources.theme import get_palette
 from servicedeck.gui.views.dialogs.remote_onboarding import (
+    LOCAL_TARGET,
     handle_elevation_error,
     needs_elevation,
 )
+from servicedeck.gui.views.unit_highlighter import UnitFileHighlighter
 from servicedeck.gui.workers.service_worker import run_async_task
 
 DEFAULT_SERVICE_TEMPLATE = (
@@ -263,6 +265,7 @@ class CreateServiceDialog(QDialog):
         self._content_edit.setFont(mono_font)
         self._content_edit.setPlainText(DEFAULT_SERVICE_TEMPLATE)
         self._content_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._highlighter = UnitFileHighlighter(self._content_edit.document(), self._theme)
         right_pane_layout.addWidget(self._content_edit, 1)
 
         split_layout.addWidget(editor_card, 1)
@@ -366,7 +369,7 @@ class CreateServiceDialog(QDialog):
             )
         else:
             self._path_label.setText(
-                f"Target: <code>/etc/systemd/system/{file_name}</code> (requires authentication)"
+                f"Target: <code>/etc/systemd/system/{file_name}</code> (asks for the administrator password)"
             )
 
     def file_name(self) -> str:
@@ -519,7 +522,7 @@ class CreateServiceDialog(QDialog):
         self._submit(name, content_text, scope)
 
     def _submit(self, name: str, content_text: str, scope: str, *, _elevated: bool = False) -> None:
-        """Create the unit; on a remote host, get administrator access once if needed."""
+        """Create the unit; get administrator access once if a system unit needs it."""
         assert self._client is not None
         client = self._client
         device_id = self._device_id
@@ -556,14 +559,14 @@ class CreateServiceDialog(QDialog):
             )
 
         def on_error(msg: str, exc: Any) -> None:
-            if device_id is not None and not _elevated and needs_elevation(exc):
+            if not _elevated and needs_elevation(exc):
                 self._create_btn.setText("Waiting for administrator access...")
                 handle_elevation_error(
                     self,
                     client,
                     device_id,
                     exc,
-                    target=self._target,
+                    target=self._target if device_id is not None else LOCAL_TARGET,
                     retry=lambda: self._submit(name, content_text, scope, _elevated=True),
                     on_give_up=show_failure,
                     on_elevated=self._on_elevated,

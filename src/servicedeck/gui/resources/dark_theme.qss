@@ -175,23 +175,26 @@ QLabel#contextSubtitle {
 QLabel#liveIndicator {
     background-color: #162033;
     border: 1px solid #263348;
-    border-radius: 11px;
+    border-radius: 10px;
     padding: 3px 10px;
     font-size: 11px;
     font-weight: 600;
 }
 
-QPushButton#filterChip {
+QPushButton#filterChip,
+QPushButton#filterChipFailed {
     background-color: #162033;
     color: #CBD5E1;
     border: 1px solid #263348;
-    border-radius: 14px;
-    padding: 4px 12px;
+    border-radius: 8px;
+    padding: 5px 12px;
+    min-height: 20px;
     font-size: 12px;
     font-weight: 600;
 }
 
-QPushButton#filterChip:hover {
+QPushButton#filterChip:hover,
+QPushButton#filterChipFailed:hover {
     background-color: #1E293B;
     color: #F8FAFC;
     border-color: #334155;
@@ -201,21 +204,6 @@ QPushButton#filterChip:checked {
     background-color: #172B47;
     color: #38BDF8;
     border-color: #38BDF8;
-}
-
-QPushButton#filterChipFailed {
-    background-color: #162033;
-    color: #CBD5E1;
-    border: 1px solid #263348;
-    border-radius: 14px;
-    padding: 4px 12px;
-    font-size: 12px;
-    font-weight: 600;
-}
-
-QPushButton#filterChipFailed:hover {
-    background-color: #1E293B;
-    color: #F8FAFC;
 }
 
 QPushButton#filterChipFailed:checked {

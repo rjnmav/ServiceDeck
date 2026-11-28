@@ -1,8 +1,10 @@
 """Main application window for ServiceDeck PySide6 client."""
 
+import base64
+import logging
 from typing import Any
 
-from PySide6.QtCore import QEvent, QItemSelection, QPoint, Qt, QTimer
+from PySide6.QtCore import QByteArray, QEvent, QItemSelection, QPoint, Qt, QTimer
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -24,21 +26,26 @@ from servicedeck.api_client import ServiceDeckClient
 from servicedeck.api_client.models.remote import RemoteDevice
 from servicedeck.api_client.models.service import (
     DaemonReloadResult,
+    RevertResult,
     Service,
     ServiceEvent,
     ServiceOperationResult,
 )
 from servicedeck.gui.models.service_filter_model import ServiceFilterModel
 from servicedeck.gui.models.service_model import ServiceTableModel
+from servicedeck.gui.notifications import DesktopNotifier
+from servicedeck.gui.preferences import GuiPreferences, GuiPreferencesStore, WatchedService
 from servicedeck.gui.resources.icon_helper import IconHelper
 from servicedeck.gui.resources.theme import build_qpalette, get_palette, load_stylesheet
 from servicedeck.gui.views.dialogs.add_remote_device_dialog import AddRemoteDeviceDialog
 from servicedeck.gui.views.dialogs.create_service_dialog import CreateServiceDialog
+from servicedeck.gui.views.dialogs.edit_override_dialog import EditOverrideDialog
 from servicedeck.gui.views.dialogs.manage_remote_devices_dialog import (
     ManageRemoteDevicesDialog,
 )
 from servicedeck.gui.views.dialogs.preferences_dialog import PreferencesDialog
 from servicedeck.gui.views.dialogs.remote_onboarding import (
+    LOCAL_TARGET,
     MAX_ONBOARDING_STEPS,
     connect_with_onboarding,
     handle_elevation_error,
@@ -49,29 +56,52 @@ from servicedeck.gui.views.host_sidebar import HostSidebar
 from servicedeck.gui.views.service_delegate import ServiceItemDelegate
 from servicedeck.gui.views.service_detail_panel import ServiceDetailPanel
 from servicedeck.gui.views.service_toolbar import ServiceToolbar
+from servicedeck.gui.watch_monitor import ServiceWatchMonitor, WatchKey
 from servicedeck.gui.workers.service_worker import run_async_task
 from servicedeck.gui.workers.stream_worker import StreamWorker
 
 #: Reconnect delays (seconds) after the live update stream drops, growing per failure.
 LIVE_RETRY_DELAYS = (2, 5, 10, 30, 60)
+logger = logging.getLogger(__name__)
+
+
+def _watch_sort_key(key: WatchKey) -> tuple[str, str, str]:
+    return (key.device_id or "", key.scope, key.name)
 
 
 class MainWindow(QMainWindow):
     """Master-detail main window with Host/Scope rail, filterable list, and right inspector."""
 
-    def __init__(self, client: ServiceDeckClient, parent: Any = None) -> None:
+    def __init__(
+        self,
+        client: ServiceDeckClient,
+        parent: Any = None,
+        preferences_store: GuiPreferencesStore | None = None,
+        notifier: DesktopNotifier | None = None,
+    ) -> None:
         super().__init__(parent)
         self.client = client
-        self._current_theme = "dark"
+        self._prefs_store = preferences_store or GuiPreferencesStore()
+        prefs = self._prefs_store.load()
+        self._notifier = notifier or DesktopNotifier()
+        self._notify_on_failure: bool = prefs.notify_on_failure
+        # Watched services: notified when they fail, on any host and scope.
+        self._watch_monitor = ServiceWatchMonitor(client, self)
+        self._watch_monitor.service_failed.connect(self._on_watched_service_failed)
+
+        self._current_theme: str = prefs.theme
         self._current_scope = "user"
         self._current_device_id: str | None = None
         self._devices: list[RemoteDevice] = []
         self._is_busy = False
         self._onboarding_steps = 0
-        # Devices with a running administrator (root) agent, as last reported by the backend.
-        self._elevated_devices: set[str] = set()
-        self._log_refresh_interval = 5
-        self._resource_refresh_interval = 2
+        # Hosts with a running administrator (root) agent, as last reported by the backend.
+        # ``None`` stands for this computer (system unit file changes).
+        self._elevated_devices: set[str | None] = set()
+        self._log_refresh_interval: int = prefs.log_refresh_interval
+        self._resource_refresh_interval: int = prefs.resource_refresh_interval
+        self._window_maximized: bool = prefs.window_maximized
+        self._saved_splitter_sizes: list[int] | None = prefs.splitter_sizes
 
         # Live updates: one event stream for the shown (device, scope).
         self._live_worker: StreamWorker | None = None
@@ -93,11 +123,41 @@ class MainWindow(QMainWindow):
 
         self._setup_menu_bar()
         self._setup_ui()
+        self._restore_workspace_state(prefs)
         self._connect_signals()
         self._setup_shortcuts()
         self.apply_theme(self._current_theme)
 
+        self._watch_monitor.set_watched(
+            WatchKey(w.device_id, w.scope, w.name) for w in prefs.watched_services
+        )
+        self._refresh_watch_marks()
         self._initial_load()
+
+    def _restore_workspace_state(self, prefs: GuiPreferences) -> None:
+        """Apply persisted refresh intervals, window geometry, and splitter sizes."""
+        self._detail_panel.set_refresh_intervals(
+            self._log_refresh_interval, self._resource_refresh_interval
+        )
+        if prefs.window_geometry:
+            try:
+                raw = base64.b64decode(prefs.window_geometry.encode("ascii"))
+                self.restoreGeometry(QByteArray(raw))
+            except Exception:
+                logger.warning("Ignoring invalid saved window geometry")
+        if (
+            prefs.splitter_sizes
+            and len(prefs.splitter_sizes) == 2
+            and all(s > 0 for s in prefs.splitter_sizes)
+        ):
+            self._splitter.setSizes(prefs.splitter_sizes)
+
+    def show_initial(self) -> None:
+        """Show the window respecting the saved maximized vs. normal geometry state."""
+        if self._window_maximized:
+            self.showMaximized()
+        else:
+            self.show()
 
     def _setup_menu_bar(self) -> None:
         menubar = QMenuBar(self)
@@ -247,6 +307,9 @@ class MainWindow(QMainWindow):
         # Right Inspector Drawer
         self._detail_panel.action_requested.connect(self._on_inspector_action)
         self._detail_panel.close_requested.connect(self._on_inspector_closed)
+        self._detail_panel.edit_override_requested.connect(self._on_edit_override_requested)
+        self._detail_panel.watch_toggled.connect(self._on_watch_toggled)
+        self._detail_panel.revert_requested.connect(self._on_revert_requested)
 
         # Table Selection & Context Menu
         sel_model = self._table_view.selectionModel()
@@ -276,6 +339,7 @@ class MainWindow(QMainWindow):
             self._populate_table(services)
             self.set_status(f"Connected to backend ({active_scope} scope)", success=True)
             self._ensure_live_updates()
+            self._sync_local_admin_state()
 
         def on_error(msg: str, exc: Any) -> None:
             self.set_status(f"Backend unavailable: {msg}", success=False)
@@ -345,9 +409,11 @@ class MainWindow(QMainWindow):
     def _update_context_header(self) -> None:
         self._toolbar.set_context(self._get_host_display_name(), self._current_scope)
         self._update_window_title()
+        self._refresh_watch_marks()
 
     def _populate_table(self, services: list[Service]) -> None:
         self._table_model.set_services(services)
+        self._refresh_watch_marks()
         self._update_counts()
         self._detail_panel.clear()
         self._detail_panel.hide()
@@ -364,6 +430,9 @@ class MainWindow(QMainWindow):
         if service:
             self._detail_panel.show_service_details(
                 service, scope=self._current_scope, device_id=self._current_device_id
+            )
+            self._detail_panel.set_watched(
+                self._watch_monitor.is_watched(self._watch_key(service.name))
             )
 
     def _on_inspector_closed(self) -> None:
@@ -541,6 +610,90 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self.request_service_list()
 
+    # --- Unit file overrides (drop-ins) ---
+
+    def _on_edit_override_requested(self) -> None:
+        unit = self._detail_panel.current_unit_file
+        if unit is None or self._is_busy:
+            return
+        device_id = self._detail_panel.current_device_id
+        dlg = EditOverrideDialog(
+            self,
+            client=self.client,
+            unit=unit,
+            scope=self._detail_panel.current_scope,
+            device_id=device_id,
+            target=self._device_target(device_id) if device_id is not None else LOCAL_TARGET,
+            on_elevated=self._mark_current_device_elevated,
+        )
+        if not dlg.exec():
+            return
+        result = dlg.result_override
+        if result is not None:
+            if result.removed:
+                self.set_status(f"Removed {result.path}; systemd reloaded.", success=True)
+            else:
+                note = f" ({len(result.warnings)} warning(s))" if result.warnings else ""
+                self.set_status(f"Saved {result.path}; systemd reloaded{note}.", success=True)
+        self._detail_panel.refresh_unit_file()
+        self._refresh_after_change()
+
+    def _on_revert_requested(self) -> None:
+        unit = self._detail_panel.current_unit_file
+        if unit is None or self._is_busy or not unit.editable_drop_ins:
+            return
+        files = "<br>".join(f"<code>{d.path}</code>" for d in unit.editable_drop_ins)
+        reply = QMessageBox.warning(
+            self,
+            "Revert to Vendor Configuration",
+            f"Remove the overrides of <b>{unit.service}</b>?<br><br>"
+            f"These files will be deleted:<br>{files}<br><br>"
+            "systemd is reloaded afterwards. A running service keeps its current settings "
+            "until it is restarted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._revert_overrides(
+            unit.service, self._detail_panel.current_scope, self._detail_panel.current_device_id
+        )
+
+    def _revert_overrides(
+        self, name: str, scope: str, device_id: str | None, *, _elevated: bool = False
+    ) -> None:
+        def task() -> RevertResult:
+            return self.client.revert_overrides(name, scope=scope, device_id=device_id)
+
+        def on_start() -> None:
+            self._is_busy = True
+            self._detail_panel.set_actions_enabled(False)
+            self.set_status(f"Reverting '{name}' to its vendor configuration...")
+
+        def on_success(result: RevertResult) -> None:
+            self._is_busy = False
+            self._detail_panel.set_actions_enabled(True)
+            count = len(result.removed_paths)
+            self.set_status(
+                f"Removed {count} override file(s) of '{name}'; systemd reloaded.", success=True
+            )
+            self._detail_panel.refresh_unit_file()
+            self._refresh_after_change()
+
+        def on_error(msg: str, exc: Any) -> None:
+            self._is_busy = False
+            self._detail_panel.set_actions_enabled(True)
+            if not _elevated and needs_elevation(exc):
+                self._request_elevation(
+                    device_id,
+                    exc,
+                    retry=lambda: self._revert_overrides(name, scope, device_id, _elevated=True),
+                )
+                return
+            self.set_status(f"Failed to revert '{name}': {msg}", success=False)
+
+        run_async_task(task, on_start=on_start, on_success=on_success, on_error=on_error)
+
     def _on_system_scope_toggled(self, is_system: bool) -> None:
         new_scope = "system" if is_system else "user"
         if new_scope == self._current_scope:
@@ -553,6 +706,7 @@ class MainWindow(QMainWindow):
         self._detail_panel.hide()
         if self._table_view.selectionModel():
             self._table_view.selectionModel().clearSelection()
+        self._toolbar.clear_filters()
 
         device_id = self._current_device_id
 
@@ -710,9 +864,11 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: Any) -> None:
-        """Close live streams before the window goes away."""
+        """Persist workspace preferences and close live streams before exit."""
+        self._save_preferences(include_layout=True)
         self._live_retry_timer.stop()
         self._stop_live_updates()
+        self._watch_monitor.stop()
         self._detail_panel.stop_timers()
         super().closeEvent(event)
 
@@ -729,9 +885,15 @@ class MainWindow(QMainWindow):
         """Update window title cleanly without duplicating applicationDisplayName."""
         self.setWindowTitle(self._get_host_display_name())
 
-    def _request_elevation(self, device_id: str, exc: Any, *, retry: Any) -> None:
-        """Get administrator access on ``device_id`` (asking for sudo), then ``retry``."""
-        self.set_status(f"Requesting administrator access on {self._get_host_display_name()}...")
+    def _request_elevation(self, device_id: str | None, exc: Any, *, retry: Any) -> None:
+        """Get administrator access on ``device_id`` (asking for sudo), then ``retry``.
+
+        ``device_id=None`` means this computer (system unit file changes).
+        """
+        where = "this computer" if device_id is None else self._get_host_display_name()
+        self.set_status(f"Requesting administrator access on {where}...")
+        self._elevated_devices.discard(device_id)
+        self._update_admin_indicator()
 
         def elevated() -> None:
             self._elevated_devices.add(device_id)
@@ -742,7 +904,7 @@ class MainWindow(QMainWindow):
             self.client,
             device_id,
             exc,
-            target=self._device_target(device_id),
+            target=self._device_target(device_id) if device_id is not None else LOCAL_TARGET,
             retry=retry,
             on_give_up=lambda reason: self.set_status(
                 f"Administrator access not granted: {reason}", success=False
@@ -751,25 +913,61 @@ class MainWindow(QMainWindow):
         )
 
     def _mark_current_device_elevated(self) -> None:
-        if self._current_device_id is not None:
-            self._elevated_devices.add(self._current_device_id)
-            self._update_admin_indicator()
+        self._elevated_devices.add(self._current_device_id)
+        self._update_admin_indicator()
 
     def _update_admin_indicator(self) -> None:
         device_id = self._current_device_id
-        self._sidebar.admin_button.setVisible(
-            device_id is not None and device_id in self._elevated_devices
+        button = self._sidebar.admin_button
+        button.setVisible(device_id in self._elevated_devices)
+        if device_id is None:
+            button.setToolTip(
+                "System unit files on this computer are changed with administrator access.\n"
+                "Click to drop administrator privileges."
+            )
+        else:
+            button.setToolTip(
+                "System services on this remote host use administrator access.\n"
+                "Click to drop administrator privileges."
+            )
+
+    def _sync_local_admin_state(self) -> None:
+        """Ask the backend whether this computer's admin session is still running.
+
+        It ends by itself after a while without use, so the indicator is refreshed when
+        the local host is shown.
+        """
+
+        def on_success(elevated: Any) -> None:
+            if elevated is True:
+                self._elevated_devices.add(None)
+            else:
+                self._elevated_devices.discard(None)
+            self._update_admin_indicator()
+
+        run_async_task(
+            self.client.get_local_elevation,
+            on_success=on_success,
+            on_error=lambda _msg, _exc: None,
         )
 
     def _on_drop_admin_clicked(self) -> None:
         device_id = self._current_device_id
-        if device_id is None:
-            return
 
         def done(_result: Any = None) -> None:
             self._elevated_devices.discard(device_id)
             self._update_admin_indicator()
             self.set_status("Administrator access dropped.", success=True)
+
+        if device_id is None:
+            run_async_task(
+                self.client.drop_local_elevation,
+                on_success=done,
+                on_error=lambda msg, _exc: self.set_status(
+                    f"Failed to drop administrator access: {msg}", success=False
+                ),
+            )
+            return
 
         run_async_task(
             self.client.drop_device_privileges,
@@ -782,11 +980,15 @@ class MainWindow(QMainWindow):
 
     def _on_target_host_changed(self, device_id: str | None) -> None:
         """Switch target host and refresh service inventory."""
+        if device_id != self._current_device_id:
+            self._toolbar.clear_filters()
         self._current_device_id = device_id
         self._stop_live_updates()
         self._live_retry_timer.stop()
         self._live_failures = 0
         self._update_admin_indicator()
+        if device_id is None:
+            self._sync_local_admin_state()
         self._update_context_header()
         self._detail_panel.clear()
         self._detail_panel.hide()
@@ -880,6 +1082,8 @@ class MainWindow(QMainWindow):
             if target_id is not None and not any(d.id == target_id for d in devices):
                 target_id = None
 
+            if target_id != self._current_device_id:
+                self._toolbar.clear_filters()
             self._current_device_id = target_id
             self._update_admin_indicator()
             self._update_context_header()
@@ -942,8 +1146,78 @@ class MainWindow(QMainWindow):
             self._on_unmask_clicked,
         )
 
+        menu.addSeparator()
+        name = self._selected_service_name()
+        if name:
+            key = self._watch_key(name)
+            watch_action = menu.addAction(
+                IconHelper.svg_icon("bell", palette.warning_text), "Notify on Failure"
+            )
+            watch_action.setCheckable(True)
+            watch_action.setChecked(self._watch_monitor.is_watched(key))
+            watch_action.toggled.connect(lambda checked, k=key: self._set_watched(k, checked))
+
         global_pos = self._table_view.viewport().mapToGlobal(pos)
         menu.exec(global_pos)
+
+    # --- Watched services (notify on failure) ---
+
+    def _watch_key(self, name: str) -> WatchKey:
+        return WatchKey(self._current_device_id, self._current_scope, name)
+
+    def _refresh_watch_marks(self) -> None:
+        """Show the bell on watched rows of the host and scope on screen."""
+        group = (self._current_device_id, self._current_scope)
+        self._table_model.set_watched_names(
+            {k.name for k in self._watch_monitor.watched if k.group == group}
+        )
+
+    def _on_watch_toggled(self, checked: bool) -> None:
+        service = self._detail_panel.current_service
+        if service is None:
+            return
+        key = WatchKey(
+            self._detail_panel.current_device_id, self._detail_panel.current_scope, service.name
+        )
+        self._set_watched(key, checked)
+
+    def _set_watched(self, key: WatchKey, watched: bool) -> None:
+        if watched == self._watch_monitor.is_watched(key):
+            return
+        if watched:
+            self._watch_monitor.watch(key)
+            self.set_status(f"You will be notified if {key.name} fails.", success=True)
+        else:
+            self._watch_monitor.unwatch(key)
+            self.set_status(f"Stopped watching {key.name}.")
+        self._refresh_watch_marks()
+        current = self._detail_panel.current_service
+        if current is not None and current.name == key.name:
+            self._detail_panel.set_watched(
+                self._watch_monitor.is_watched(self._watch_key(key.name))
+            )
+        self._save_preferences()
+
+    def _host_label(self, device_id: str | None) -> str:
+        if device_id is None:
+            return "this computer"
+        for dev in self._devices:
+            if dev.id == device_id:
+                return dev.display_name or dev.hostname
+        return device_id
+
+    def _on_watched_service_failed(self, key: WatchKey, service: Service) -> None:
+        where = f"{self._host_label(key.device_id)}, {key.scope} scope"
+        summary = f"{service.name} failed"
+        body = f"{service.description or service.name} on {where} ({service.sub_state})."
+        self.set_status(f"Alert: {service.name} failed on {where}", success=False)
+        QApplication.alert(self)
+        if self._notify_on_failure:
+            self._notifier.notify(
+                summary,
+                body,
+                on_failed=lambda reason: logger.info("No desktop notification: %s", reason),
+            )
 
     def set_status(self, message: str, success: bool | None = None) -> None:
         """Update status bar label and styling."""
@@ -956,9 +1230,45 @@ class MainWindow(QMainWindow):
         else:
             self._status_label.setStyleSheet("")
 
+    def _save_preferences(self, *, include_layout: bool = False) -> None:
+        """Persist current theme, intervals, and optionally window layout."""
+        theme = "light" if self._current_theme == "light" else "dark"
+        existing = self._prefs_store.load()
+        geometry_b64 = existing.window_geometry
+        maximized = existing.window_maximized
+        splitter_sizes = existing.splitter_sizes
+
+        if include_layout:
+            maximized = self.isMaximized()
+            if not maximized:
+                geometry_b64 = base64.b64encode(bytes(self.saveGeometry())).decode("ascii")
+            if self._detail_panel.isVisible():
+                sizes = self._splitter.sizes()
+                if len(sizes) == 2 and all(s > 0 for s in sizes):
+                    splitter_sizes = sizes
+
+        prefs = GuiPreferences(
+            theme=theme,  # type: ignore[arg-type]
+            log_refresh_interval=max(1, min(60, self._log_refresh_interval)),
+            resource_refresh_interval=max(1, min(60, self._resource_refresh_interval)),
+            window_maximized=maximized,
+            window_geometry=geometry_b64,
+            splitter_sizes=splitter_sizes,
+            watched_services=[
+                WatchedService(device_id=k.device_id, scope=k.scope, name=k.name)  # type: ignore[arg-type]
+                for k in sorted(self._watch_monitor.watched, key=_watch_sort_key)
+            ],
+            notify_on_failure=self._notify_on_failure,
+        )
+        try:
+            self._prefs_store.save(prefs)
+        except Exception as exc:
+            logger.warning("Could not persist GUI preferences: %s", exc)
+
     def _on_toggle_theme(self) -> None:
         next_theme = "light" if self._current_theme == "dark" else "dark"
         self.apply_theme(next_theme)
+        self._save_preferences()
 
     def apply_theme(self, theme: str) -> None:
         """Apply dark or light theme palette, stylesheet, icons, and delegates."""
@@ -1003,15 +1313,21 @@ class MainWindow(QMainWindow):
             log_interval=self._log_refresh_interval,
             res_interval=self._resource_refresh_interval,
             parent=self,
+            notify_on_failure=self._notify_on_failure,
         )
+        dlg.notifications_changed.connect(self._on_notifications_pref_changed)
         dlg.preferences_changed.connect(self._on_preferences_updated)
         dlg.exec()
+
+    def _on_notifications_pref_changed(self, enabled: bool) -> None:
+        self._notify_on_failure = enabled
 
     def _on_preferences_updated(self, theme: str, log_int: int, res_int: int) -> None:
         self._log_refresh_interval = log_int
         self._resource_refresh_interval = res_int
         self.apply_theme(theme)
         self._detail_panel.set_refresh_intervals(log_int, res_int)
+        self._save_preferences()
 
     def _on_about_clicked(self) -> None:
         QMessageBox.about(

@@ -25,6 +25,8 @@ class ServiceTableModel(QAbstractTableModel):
     ROLE_ACTIVE_STATE = Qt.ItemDataRole.UserRole + 2
     ROLE_SUB_STATE = Qt.ItemDataRole.UserRole + 3
     ROLE_UNIT_FILE_STATE = Qt.ItemDataRole.UserRole + 4
+    #: True if the user asked to be notified when this service fails.
+    ROLE_WATCHED = Qt.ItemDataRole.UserRole + 5
 
     HEADER_LABELS: ClassVar[dict[int, str]] = {
         COL_SERVICE: "Service",
@@ -49,6 +51,7 @@ class ServiceTableModel(QAbstractTableModel):
         self._services: list[Service] = []
         self._rows: dict[str, int] = {}
         self._highlights: dict[str, tuple[float, QColor]] = {}
+        self._watched_names: set[str] = set()
         self._bold_font = QFont()
         self._bold_font.setBold(True)
         self._highlight_timer = QTimer(self)
@@ -121,6 +124,9 @@ class ServiceTableModel(QAbstractTableModel):
         elif role == self.ROLE_UNIT_FILE_STATE:
             return service.unit_file_state.lower()
 
+        elif role == self.ROLE_WATCHED:
+            return service.name in self._watched_names
+
         elif role == Qt.ItemDataRole.ForegroundRole:
             if col == self.COL_STATUS:
                 state = service.active_state.lower()
@@ -167,6 +173,15 @@ class ServiceTableModel(QAbstractTableModel):
         if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             return self.HEADER_LABELS.get(section)
         return None
+
+    def set_watched_names(self, names: set[str]) -> None:
+        """Mark which rows are watched for failures (for the shown host and scope)."""
+        changed = names ^ self._watched_names
+        self._watched_names = set(names)
+        for name in changed:
+            row = self.row_of(name)
+            if row is not None:
+                self._emit_row_changed(row)
 
     def set_services(self, services: list[Service]) -> None:
         """Populate the model with a new list of services."""

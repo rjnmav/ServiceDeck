@@ -1,4 +1,6 @@
-"""Administrator (root) agent started through ``sudo`` on an existing SSH connection.
+"""Administrator (root) agent started through ``sudo``: on a remote host's SSH connection
+(:class:`PrivilegedAgent`) or on this computer (:class:`LocalPrivilegedAgent`, used for
+system unit file changes).
 
 This follows Cockpit's "superuser" model: rather than answering a Polkit prompt for every
 action (systemd's ``manage-units`` is ``auth_admin`` without caching for SSH sessions), a
@@ -26,6 +28,7 @@ import collections
 import contextlib
 import logging
 import shlex
+import sys
 import time
 from typing import Any
 
@@ -62,31 +65,35 @@ def sudo_command(agent_command: str, *, with_password: bool) -> str:
     return shlex.join(["exec", "sudo", *flags, "--", "sh", "-c", inner])
 
 
-class PrivilegedAgent:
-    """A root-owned agent channel sharing the device's SSH connection."""
+class _SudoAgent:
+    """A root-owned agent started through sudo; subclasses decide how the process is spawned."""
 
     #: The uid the agent must report in its hello; anything else is refused.
     required_uid = 0
 
     def __init__(
         self,
-        conn: asyncssh.SSHClientConnection,
         *,
         hostname: str,
         label: str,
         launch_mode: str,
         remote_command: str = "servicedeck-remote",
+        python: str = "python3",
     ) -> None:
-        self._conn = conn
         self._hostname = hostname
         self._label = f"{label}:root"
         self._launch_mode = launch_mode
         self._remote_command = remote_command
-        self._process: asyncssh.SSHClientProcess | None = None
+        self._python = python
+        self._process: Any = None
         self._hello: HelloMessage | None = None
         self._channel: AgentChannel | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_tail: collections.deque[str] = collections.deque(maxlen=20)
+
+    async def _spawn(self, command: str) -> Any:
+        """Start ``command`` (a shell command line) with piped stdin, stdout and stderr."""
+        raise NotImplementedError
 
     @property
     def is_alive(self) -> bool:
@@ -101,22 +108,13 @@ class PrivilegedAgent:
     async def start(self, password: str | None, timeout: float = 30.0) -> HelloMessage:
         """Run sudo, authenticate, and hand-shake with the root agent."""
         payload = get_agent_payload() if self._launch_mode == "bundled" else None
-        agent = stage1_command(len(payload.data)) if payload else f"exec {self._remote_command}"
+        agent = (
+            stage1_command(len(payload.data), python=self._python)
+            if payload
+            else f"exec {self._remote_command}"
+        )
         command = sudo_command(agent, with_password=password is not None)
-
-        try:
-            self._process = await self._conn.create_process(
-                command,
-                stdin=asyncssh.PIPE,
-                stdout=asyncssh.PIPE,
-                stderr=asyncssh.PIPE,
-                encoding=None,
-            )
-        except (asyncssh.Error, OSError) as exc:
-            raise RemoteConnectionError(
-                f"Could not open an administrator session on {self._hostname}: {exc}",
-                details={"hostname": self._hostname},
-            ) from exc
+        self._process = await self._spawn(command)
 
         try:
             await self._authenticate(password, timeout)
@@ -270,4 +268,103 @@ class PrivilegedAgent:
             await channel.close()
 
 
-__all__ = ["SUDO_PROMPT", "SUDO_READY", "PrivilegedAgent", "sudo_command"]
+class PrivilegedAgent(_SudoAgent):
+    """A root-owned agent channel sharing the device's SSH connection."""
+
+    def __init__(
+        self,
+        conn: asyncssh.SSHClientConnection,
+        *,
+        hostname: str,
+        label: str,
+        launch_mode: str,
+        remote_command: str = "servicedeck-remote",
+    ) -> None:
+        super().__init__(
+            hostname=hostname, label=label, launch_mode=launch_mode, remote_command=remote_command
+        )
+        self._conn = conn
+
+    async def _spawn(self, command: str) -> Any:
+        try:
+            return await self._conn.create_process(
+                command,
+                stdin=asyncssh.PIPE,
+                stdout=asyncssh.PIPE,
+                stderr=asyncssh.PIPE,
+                encoding=None,
+            )
+        except (asyncssh.Error, OSError) as exc:
+            raise RemoteConnectionError(
+                f"Could not open an administrator session on {self._hostname}: {exc}",
+                details={"hostname": self._hostname},
+            ) from exc
+
+
+class _LocalProcess:
+    """Gives an ``asyncio`` subprocess the small process API the sudo agent and channel use."""
+
+    def __init__(self, process: asyncio.subprocess.Process) -> None:
+        self._process = process
+        self.stdin = process.stdin
+        self.stdout = process.stdout
+        self.stderr = process.stderr
+
+    def is_closing(self) -> bool:
+        return self._process.returncode is not None
+
+    @property
+    def exit_status(self) -> int | None:
+        return self._process.returncode
+
+    async def wait(self) -> int:
+        return await self._process.wait()
+
+    def close(self) -> None:
+        if self._process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                self._process.kill()
+
+
+class LocalPrivilegedAgent(_SudoAgent):
+    """The same root agent, started with sudo on this computer.
+
+    The backend runs unprivileged; files under ``/etc/systemd/system`` can only be written
+    by root, and systemd's D-Bus API has no call for writing unit files. This agent is used
+    for system-scope unit file changes on the local machine.
+    """
+
+    def __init__(self, *, python: str | None = None) -> None:
+        super().__init__(
+            hostname="this computer",
+            label="local",
+            launch_mode="bundled",
+            python=python or sys.executable or "python3",
+        )
+
+    async def _spawn(self, command: str) -> Any:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "/bin/sh",
+                "-c",
+                command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise RemoteConnectionError(
+                f"Could not open an administrator session on this computer: {exc}",
+                details={"hostname": self._hostname},
+            ) from exc
+        return _LocalProcess(process)
+
+
+__all__ = [
+    "SUDO_PROMPT",
+    "SUDO_READY",
+    "LocalPrivilegedAgent",
+    "PrivilegedAgent",
+    "sudo_command",
+]

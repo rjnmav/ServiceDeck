@@ -11,6 +11,13 @@ from servicedeck.backend.exceptions import (
     SystemdConnectionError,
 )
 from servicedeck.backend.models.service import Service, ServiceResourceUsage
+from servicedeck.backend.models.unit_files import (
+    DropIn,
+    OverrideResult,
+    UnitFileInfo,
+    override_result_from_dict,
+    unit_info_from_dict,
+)
 from servicedeck.remote.models import RequestMessage
 from servicedeck.remote_agent.dispatcher import RequestDispatcher
 
@@ -241,3 +248,82 @@ async def test_dispatch_systemd_connection_error(
     resp = await dispatcher.dispatch(req)
     assert resp.success is False
     assert resp.error.code == "SYSTEMD_CONNECTION_ERROR"
+
+
+# --- Unit files and drop-in overrides ---
+
+
+async def test_dispatch_unit_info_round_trips_through_remote_manager_model(
+    dispatcher: RequestDispatcher, mock_service_manager: MagicMock
+) -> None:
+    info = UnitFileInfo(
+        service="ssh.service",
+        scope="system",
+        fragment_path="/usr/lib/systemd/system/ssh.service",
+        content="[Unit]\n",
+        drop_ins=[DropIn("/etc/systemd/system/ssh.service.d/override.conf", "[Service]\n", True)],
+        override_path="/etc/systemd/system/ssh.service.d/override.conf",
+        need_daemon_reload=True,
+    )
+    mock_service_manager.get_unit_info = AsyncMock(return_value=info)
+    req = RequestMessage(
+        id=40, method="service.unit_info", params={"name": "ssh", "scope": "system"}
+    )
+    resp = await dispatcher.dispatch(req)
+    assert resp.success is True
+    assert resp.result["drop_ins"][0]["editable"] is True
+    # What RemoteManager rebuilds from the JSON is the original value.
+    assert unit_info_from_dict(resp.result) == info
+
+
+async def test_dispatch_override_write_and_revert(
+    dispatcher: RequestDispatcher, mock_service_manager: MagicMock
+) -> None:
+    result = OverrideResult(
+        "ssh.service", "system", "/etc/systemd/system/ssh.service.d/override.conf", warnings=["w"]
+    )
+    mock_service_manager.write_override = AsyncMock(return_value=result)
+    mock_service_manager.revert_overrides = AsyncMock(return_value=["/etc/x.conf"])
+
+    resp = await dispatcher.dispatch(
+        RequestMessage(
+            id=41,
+            method="service.override.write",
+            params={"name": "ssh", "content": "[Service]\nNice=5\n", "scope": "system"},
+        )
+    )
+    assert resp.success is True
+    assert override_result_from_dict(resp.result) == result
+    mock_service_manager.write_override.assert_awaited_once_with(
+        name="ssh", content="[Service]\nNice=5\n", scope="system", drop_in="override.conf"
+    )
+
+    resp = await dispatcher.dispatch(
+        RequestMessage(id=42, method="service.override.revert", params={"name": "ssh"})
+    )
+    assert resp.result == {"removed": ["/etc/x.conf"]}
+
+
+async def test_dispatch_override_permission_error_is_an_elevation_code(
+    dispatcher: RequestDispatcher, mock_service_manager: MagicMock
+) -> None:
+    mock_service_manager.write_override = AsyncMock(
+        side_effect=AuthorizationDeniedError(action="edit", service_name="ssh.service")
+    )
+    resp = await dispatcher.dispatch(
+        RequestMessage(
+            id=43,
+            method="service.override.write",
+            params={"name": "ssh", "content": "[Service]\n", "scope": "system"},
+        )
+    )
+    assert resp.success is False
+    assert resp.error is not None
+    assert resp.error.code == "AUTHORIZATION_DENIED"
+
+
+async def test_dispatch_override_write_requires_content(dispatcher: RequestDispatcher) -> None:
+    resp = await dispatcher.dispatch(
+        RequestMessage(id=44, method="service.override.write", params={"name": "ssh"})
+    )
+    assert resp.success is False

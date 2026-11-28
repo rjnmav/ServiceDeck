@@ -1,11 +1,13 @@
 """Service management and inspection endpoints supporting user and system scopes."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
 
-from servicedeck.backend.api.dependencies import get_service_manager
+from servicedeck.backend.api.dependencies import LocalAdminDep, get_service_manager
 from servicedeck.backend.api.sse import log_lines_response
 from servicedeck.backend.core.security_logger import (
     log_authorization_denied,
@@ -13,19 +15,48 @@ from servicedeck.backend.core.security_logger import (
     log_polkit_agent_unavailable,
 )
 from servicedeck.backend.core.service_manager import ServiceManager
-from servicedeck.backend.exceptions import AuthorizationDeniedError, PolkitAgentUnavailableError
+from servicedeck.backend.exceptions import (
+    AuthorizationDeniedError,
+    LocalElevationRequiredError,
+    PolkitAgentUnavailableError,
+)
 from servicedeck.backend.models.service import ServiceScope, normalize_service_name
+from servicedeck.backend.models.unit_files import override_result_from_dict
 from servicedeck.backend.schemas.service import (
     CreateServiceRequest,
     CreateServiceResponse,
+    OverrideResponse,
     ResourceUsageResponse,
+    RevertOverridesResponse,
     ServiceLogsResponse,
     ServiceOperationResponse,
     ServiceResponse,
     UnitFileResponse,
+    WriteOverrideRequest,
 )
 
 router = APIRouter(prefix="/services", tags=["services"])
+
+
+@asynccontextmanager
+async def _audited(operation: str, service: str, scope: str) -> AsyncIterator[None]:
+    """Record a unit-file change and its outcome in the security log."""
+    try:
+        yield
+    except LocalElevationRequiredError:
+        log_operation_attempt(operation, service, scope, "elevation-required")
+        raise
+    except PolkitAgentUnavailableError:
+        log_polkit_agent_unavailable(operation, service, scope)
+        raise
+    except AuthorizationDeniedError as exc:
+        log_authorization_denied(operation, service, scope, str(exc))
+        raise
+    except Exception:
+        log_operation_attempt(operation, service, scope, "failed")
+        raise
+    log_operation_attempt(operation, service, scope, "success")
+
 
 ServiceManagerDep = Annotated[ServiceManager, Depends(get_service_manager)]
 ScopeQuery = Annotated[
@@ -291,26 +322,31 @@ async def disable_service(
 async def create_service(
     request: CreateServiceRequest,
     service_manager: ServiceManagerDep,
+    local_admin: LocalAdminDep,
 ) -> CreateServiceResponse:
-    """Create a new custom systemd service unit in the specified or active scope."""
+    """Create a new custom systemd service unit in the specified or active scope.
+
+    System units are written by the local administrator session while it is active;
+    otherwise a permission failure asks the client for administrator access.
+    """
     resolved_scope = service_manager.resolve_scope(request.scope)
-    try:
-        path = await service_manager.create_service(
+
+    async def local_call() -> str:
+        return await service_manager.create_service(
             name=request.name,
             content=request.content,
             scope=resolved_scope,
             overwrite=request.overwrite,
         )
-        log_operation_attempt("create", request.name, resolved_scope, "success")
-    except PolkitAgentUnavailableError:
-        log_polkit_agent_unavailable("create", request.name, resolved_scope)
-        raise
-    except AuthorizationDeniedError as exc:
-        log_authorization_denied("create", request.name, resolved_scope, str(exc))
-        raise
-    except Exception:
-        log_operation_attempt("create", request.name, resolved_scope, "failed")
-        raise
+
+    async with _audited("create", request.name, resolved_scope):
+        path = await local_admin.run_system_write(
+            resolved_scope,
+            "service.create",
+            {"name": request.name, "content": request.content, "overwrite": request.overwrite},
+            local_call,
+            lambda result: str(result.get("path", "")),
+        )
     return CreateServiceResponse(
         success=True,
         service=request.name,
@@ -401,16 +437,76 @@ async def get_unit_file(
     service_manager: ServiceManagerDep,
     scope: ScopeQuery = None,
 ) -> UnitFileResponse:
-    """Retrieve the on-disk unit file fragment path and content."""
+    """Retrieve the on-disk unit file, its drop-ins and the override location."""
     resolved_scope = service_manager.resolve_scope(scope)
     clean_name = normalize_service_name(service_name)
-    path, content = await service_manager.get_unit_file(clean_name, scope=resolved_scope)
-    return UnitFileResponse(
-        service=clean_name,
-        fragment_path=path,
-        content=content,
-        scope=resolved_scope,
-    )
+    info = await service_manager.get_unit_info(clean_name, scope=resolved_scope)
+    return UnitFileResponse.from_domain(info)
+
+
+@router.put(
+    "/{service_name}/override",
+    response_model=OverrideResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Write a drop-in override",
+    description="Write <unit>.d/override.conf (like 'systemctl edit'), reload systemd, and roll "
+    "back if the unit no longer loads. Content with only comments removes the drop-in.",
+)
+async def write_override(
+    service_name: str,
+    request: WriteOverrideRequest,
+    service_manager: ServiceManagerDep,
+    local_admin: LocalAdminDep,
+    scope: ScopeQuery = None,
+) -> OverrideResponse:
+    resolved_scope = service_manager.resolve_scope(scope)
+    clean_name = normalize_service_name(service_name)
+
+    async def local_call():  # type: ignore[no-untyped-def]
+        return await service_manager.write_override(
+            clean_name, request.content, scope=resolved_scope, drop_in=request.drop_in
+        )
+
+    async with _audited("edit", clean_name, resolved_scope):
+        result = await local_admin.run_system_write(
+            resolved_scope,
+            "service.override.write",
+            {"name": clean_name, "content": request.content, "drop_in": request.drop_in},
+            local_call,
+            override_result_from_dict,
+        )
+    return OverrideResponse.from_domain(result)
+
+
+@router.delete(
+    "/{service_name}/override",
+    response_model=RevertOverridesResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Revert to vendor configuration",
+    description="Delete the unit's drop-ins in the writable <unit>.d directory and reload "
+    "systemd. Vendor and runtime drop-ins are kept; the unit is not unmasked.",
+)
+async def revert_overrides(
+    service_name: str,
+    service_manager: ServiceManagerDep,
+    local_admin: LocalAdminDep,
+    scope: ScopeQuery = None,
+) -> RevertOverridesResponse:
+    resolved_scope = service_manager.resolve_scope(scope)
+    clean_name = normalize_service_name(service_name)
+
+    async def local_call() -> list[str]:
+        return await service_manager.revert_overrides(clean_name, scope=resolved_scope)
+
+    async with _audited("revert", clean_name, resolved_scope):
+        removed = await local_admin.run_system_write(
+            resolved_scope,
+            "service.override.revert",
+            {"name": clean_name},
+            local_call,
+            lambda result: [str(path) for path in result.get("removed", [])],
+        )
+    return RevertOverridesResponse(service=clean_name, scope=resolved_scope, removed_paths=removed)
 
 
 @router.get(
@@ -429,17 +525,8 @@ async def get_service_resources(
     resolved_scope = service_manager.resolve_scope(scope)
     clean_name = normalize_service_name(service_name)
     res = await service_manager.get_service_resources(clean_name, scope=resolved_scope)
-    return ResourceUsageResponse(
-        service=clean_name,
-        cpu_usage_nsec=res.cpu_usage_nsec,
-        memory_current_bytes=res.memory_current,
-        disk_read_bytes=res.io_read_bytes,
-        disk_write_bytes=res.io_write_bytes,
-        tasks_current=res.tasks_current,
-        main_pid=res.main_pid,
-        active_enter_timestamp=res.active_enter_timestamp_usec,
-        active_state="active" if res.is_active else "inactive",
-        scope=resolved_scope,
+    return ResourceUsageResponse.from_domain(res).model_copy(
+        update={"service": clean_name, "scope": resolved_scope}
     )
 
 

@@ -4,6 +4,7 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
@@ -20,6 +21,7 @@ class PreferencesDialog(QDialog):
 
     theme_changed = Signal(str)
     preferences_changed = Signal(str, int, int)  # theme, log_interval, res_interval
+    notifications_changed = Signal(bool)  # notify when a watched service fails
 
     def __init__(
         self,
@@ -27,6 +29,7 @@ class PreferencesDialog(QDialog):
         log_interval: int = 5,
         res_interval: int = 2,
         parent: Any = None,
+        notify_on_failure: bool = True,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Preferences")
@@ -34,6 +37,7 @@ class PreferencesDialog(QDialog):
         self._current_theme = current_theme
         self._log_interval = log_interval
         self._res_interval = res_interval
+        self._notify_on_failure = notify_on_failure
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -67,6 +71,13 @@ class PreferencesDialog(QDialog):
         self._res_spin.setValue(self._res_interval)
         self._res_spin.setSuffix(" seconds")
         form_layout.addRow("Resource Refresh:", self._res_spin)
+
+        self._notify_check = QCheckBox("When a watched service fails", self)
+        self._notify_check.setChecked(self._notify_on_failure)
+        self._notify_check.setToolTip(
+            "Watch a service from its Overview tab or the list's context menu."
+        )
+        form_layout.addRow("Desktop Notifications:", self._notify_check)
 
         main_layout.addLayout(form_layout)
         main_layout.addStretch()
@@ -102,6 +113,10 @@ class PreferencesDialog(QDialog):
     def resource_interval(self) -> int:
         return self._res_spin.value()
 
+    @property
+    def notify_on_failure(self) -> bool:
+        return self._notify_check.isChecked()
+
     def _on_apply(self) -> None:
         theme = self.selected_theme
         log_int = self.log_interval
@@ -109,8 +124,10 @@ class PreferencesDialog(QDialog):
         self._current_theme = theme
         self._log_interval = log_int
         self._res_interval = res_int
+        self._notify_on_failure = self.notify_on_failure
         self.theme_changed.emit(theme)
         self.preferences_changed.emit(theme, log_int, res_int)
+        self.notifications_changed.emit(self._notify_on_failure)
 
     def _on_ok(self) -> None:
         self._on_apply()

@@ -115,3 +115,17 @@ def log_remote_elevation(
         hostname or "-",
         reason or "-",
     )
+
+
+def log_local_elevation(outcome: str, reason: str | None = None) -> None:
+    """Log administrator (local root agent) access on this computer: granted, denied, dropped.
+
+    Never receives or logs the sudo password.
+    """
+    log = logger.warning if outcome == "denied" else logger.info
+    log(
+        "EVENT=local_elevation timestamp=%s outcome=%s reason=%s",
+        _timestamp(),
+        outcome,
+        reason or "-",
+    )

@@ -61,7 +61,7 @@ def _raise_for_status(response: httpx.Response) -> None:
             raise ServiceAuthorizationDeniedError(status_code, message, error_type, details)
         raise ServicePermissionDeniedError(status_code, message, error_type, details)
     if status_code == 400:
-        if error_type == "INVALID_SERVICE_NAME":
+        if error_type in ("InvalidServiceNameError", "INVALID_SERVICE_NAME"):
             raise InvalidServiceNameError(status_code, message, error_type, details)
         raise ServiceOperationError(status_code, message, error_type, details)
     if status_code == 503:

@@ -113,3 +113,17 @@ class ServiceResourceUsage:
     process_count: int | None = None
     active_enter_timestamp_usec: int | None = None
     main_pid: int | None = None
+    # --- Health (see systemd.service(5) and org.freedesktop.systemd1(5)) ---
+    #: The unit's real ActiveState (``is_active`` only says whether it is "active").
+    active_state: str = "unknown"
+    #: How often systemd restarted the service automatically (``NRestarts``).
+    n_restarts: int | None = None
+    #: Outcome of the last run: success, exit-code, signal, core-dump, timeout, ...
+    result: str | None = None
+    #: How the main process last ended: 1 exited, 2 killed, 3 dumped core (0: has not ended).
+    exec_main_code: int | None = None
+    #: Exit status (code 1) or signal number (codes 2 and 3) of the main process.
+    exec_main_status: int | None = None
+    exec_main_exit_timestamp_usec: int | None = None
+    #: When ActiveState last changed (for a failed unit: when it failed).
+    state_change_timestamp_usec: int | None = None

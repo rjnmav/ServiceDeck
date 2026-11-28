@@ -350,6 +350,15 @@ class HostSidebar(QWidget):
         self._theme = theme
         palette = get_palette(theme)
 
+        logo = QIcon(":/assets/servicedeck.svg")
+        if not logo.isNull():
+            pm = logo.pixmap(22, 22)
+            painter = QPainter(pm)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+            painter.fillRect(pm.rect(), QColor(palette.accent))
+            painter.end()
+            self._brand_icon.setPixmap(pm)
+
         self._divider.setStyleSheet(f"background-color: {palette.border}; border: none;")
         self._add_host_btn.setIcon(IconHelper.svg_icon("plus", palette.text_secondary))
         self._reload_daemon_btn.setIcon(IconHelper.svg_icon("restart", palette.text_secondary))

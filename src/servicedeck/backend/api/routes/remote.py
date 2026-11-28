@@ -11,11 +11,14 @@ from servicedeck.backend.schemas.service import (
     CreateServiceRequest,
     CreateServiceResponse,
     DaemonReloadResponse,
+    OverrideResponse,
     ResourceUsageResponse,
+    RevertOverridesResponse,
     ServiceLogsResponse,
     ServiceOperationResponse,
     ServiceResponse,
     UnitFileResponse,
+    WriteOverrideRequest,
 )
 
 router = APIRouter(prefix="/remote/{device_id}", tags=["Remote Services"])
@@ -263,16 +266,55 @@ async def get_remote_unit_file(
     remote_manager: RemoteManagerDep,
     scope: Annotated[str | None, Query(description="Scope ('user' or 'system')")] = None,
 ) -> UnitFileResponse:
-    path, content = await remote_manager.get_unit_file(
+    info = await remote_manager.get_unit_info(
         device_id=device_id,
         name=service_name,
         scope=scope,
     )
-    return UnitFileResponse(
-        service=service_name,
-        fragment_path=path,
-        content=content,
-        scope=scope or "default",
+    return UnitFileResponse.from_domain(info)
+
+
+@router.put(
+    "/services/{service_name}/override",
+    response_model=OverrideResponse,
+    summary="Write Remote Drop-in Override",
+    description="Write <unit>.d/override.conf on the remote host (like 'systemctl edit'), "
+    "reload systemd, and roll back if the unit no longer loads.",
+)
+async def write_remote_override(
+    device_id: str,
+    service_name: str,
+    request: WriteOverrideRequest,
+    remote_manager: RemoteManagerDep,
+    scope: Annotated[str | None, Query(description="Scope ('user' or 'system')")] = None,
+) -> OverrideResponse:
+    result = await remote_manager.write_override(
+        device_id=device_id,
+        name=service_name,
+        content=request.content,
+        scope=scope,
+        drop_in=request.drop_in,
+    )
+    return OverrideResponse.from_domain(result)
+
+
+@router.delete(
+    "/services/{service_name}/override",
+    response_model=RevertOverridesResponse,
+    summary="Revert Remote Unit to Vendor",
+    description="Delete the unit's writable drop-ins on the remote host and reload systemd.",
+)
+async def revert_remote_overrides(
+    device_id: str,
+    service_name: str,
+    remote_manager: RemoteManagerDep,
+    scope: Annotated[str | None, Query(description="Scope ('user' or 'system')")] = None,
+) -> RevertOverridesResponse:
+    removed = await remote_manager.revert_overrides(
+        device_id=device_id, name=service_name, scope=scope
+    )
+    return RevertOverridesResponse(
+        service=service_name, scope=scope or "user", removed_paths=removed
     )
 
 
@@ -293,18 +335,7 @@ async def get_remote_resources(
         name=service_name,
         scope=scope,
     )
-    return ResourceUsageResponse(
-        service=usage.service,
-        cpu_usage_nsec=usage.cpu_usage_nsec,
-        memory_current_bytes=usage.memory_current,
-        disk_read_bytes=usage.io_read_bytes,
-        disk_write_bytes=usage.io_write_bytes,
-        tasks_current=usage.tasks_current,
-        main_pid=usage.main_pid,
-        active_enter_timestamp=usage.active_enter_timestamp_usec,
-        active_state="active" if usage.is_active else "inactive",
-        scope=usage.scope,
-    )
+    return ResourceUsageResponse.from_domain(usage)
 
 
 @router.get(

@@ -29,6 +29,16 @@ from servicedeck.backend.models.service import (
     normalize_service_name,
     validate_scope,
 )
+from servicedeck.backend.models.unit_files import (
+    DEFAULT_DROP_IN,
+    DropIn,
+    OverrideResult,
+    UnitFileInfo,
+    drop_in_dir,
+    is_valid_drop_in_name,
+    writable_unit_dir,
+)
+from servicedeck.backend.models.unit_syntax import check_unit_text
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +105,20 @@ class SystemdAdapter(Protocol):
 
     async def get_unit_file(self, name: str, scope: str = "user") -> tuple[str | None, str]:
         """Retrieve the on-disk unit file fragment path and content."""
+        ...
+
+    async def get_unit_info(self, name: str, scope: str = "user") -> UnitFileInfo:
+        """Retrieve the unit's main file, its drop-ins and the override location."""
+        ...
+
+    async def write_override(
+        self, name: str, content: str, scope: str = "user", drop_in: str = DEFAULT_DROP_IN
+    ) -> OverrideResult:
+        """Write a drop-in override, reload systemd, and roll back if the unit stops loading."""
+        ...
+
+    async def revert_overrides(self, name: str, scope: str = "user") -> list[str]:
+        """Delete the unit's writable drop-ins (back to the vendor unit) and reload."""
         ...
 
     async def get_service_resources(self, name: str, scope: str = "user") -> ServiceResourceUsage:
@@ -650,45 +674,55 @@ class DbusSystemdAdapter:
             self._handle_error_reply(load_reply, "get_unit", normalized_name, valid_scope)
         return str(load_reply.body[0])
 
+    async def _get_unit_properties(
+        self, bus: Any, normalized_name: str, valid_scope: str, operation: str
+    ) -> dict[str, Any]:
+        """Load the unit and return its ``org.freedesktop.systemd1.Unit`` properties."""
+        unit_path = await self._get_unit_object_path(bus, normalized_name, valid_scope)
+        reply = await bus.call(
+            Message(
+                destination=self.SYSTEMD_BUS_NAME,
+                path=unit_path,
+                interface=self.PROPERTIES_INTERFACE,
+                member="GetAll",
+                signature="s",
+                body=[self.UNIT_INTERFACE],
+            )
+        )
+        if reply.message_type == MessageType.ERROR:
+            self._handle_error_reply(reply, operation, normalized_name, valid_scope)
+        props = reply.body[0] if reply.body else {}
+        return {key: getattr(value, "value", value) for key, value in props.items()}
+
+    def _timestamp(self, variant: Any) -> int | None:
+        """A systemd ``t`` timestamp (usec since epoch), or None when unset."""
+        raw = getattr(variant, "value", variant) if variant is not None else None
+        if isinstance(raw, (int, float)) and 0 < raw < self.UNAVAILABLE_COUNTER:
+            return int(raw)
+        return None
+
+    @staticmethod
+    def _read_text(path: str) -> str:
+        try:
+            return Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return f"# Error reading {path}: {exc}"
+
     async def get_unit_file(self, name: str, scope: str = "user") -> tuple[str | None, str]:
         """Retrieve the on-disk unit file fragment path and content."""
+        info = await self.get_unit_info(name, scope=scope)
+        return info.fragment_path, info.content
+
+    async def get_unit_info(self, name: str, scope: str = "user") -> UnitFileInfo:
+        """Retrieve the unit's main file, its drop-ins and where an override would go."""
         valid_scope = validate_scope(scope)
         normalized_name = normalize_service_name(name)
 
         try:
             bus = await self._connection_manager.get_bus(valid_scope)
-            unit_path = await self._get_unit_object_path(bus, normalized_name, valid_scope)
-
-            # Query FragmentPath from Unit interface
-            reply = await bus.call(
-                Message(
-                    destination=self.SYSTEMD_BUS_NAME,
-                    path=unit_path,
-                    interface=self.PROPERTIES_INTERFACE,
-                    member="Get",
-                    signature="ss",
-                    body=[self.UNIT_INTERFACE, "FragmentPath"],
-                )
+            props = await self._get_unit_properties(
+                bus, normalized_name, valid_scope, "get_unit_file"
             )
-            fragment_path: str | None = None
-            if reply.message_type != MessageType.ERROR and reply.body:
-                val = self._get_variant_value(reply.body[0])
-                if val:
-                    fragment_path = val
-
-            if fragment_path and os.path.isfile(fragment_path):
-                try:
-                    content = Path(fragment_path).read_text(encoding="utf-8", errors="replace")
-                    return fragment_path, content
-                except Exception as exc:
-                    return fragment_path, f"# Error reading unit file at {fragment_path}: {exc}"
-
-            return None, (
-                f"# No on-disk unit file found for '{normalized_name}'\n"
-                f"# FragmentPath: {fragment_path or '(empty)'}\n"
-                f"# This unit may be transient, generated, or masked in memory."
-            )
-
         except (PermissionDeniedError, ServiceNotFoundError, ServiceOperationError):
             raise
         except Exception as exc:
@@ -698,6 +732,197 @@ class DbusSystemdAdapter:
             raise SystemdConnectionError(
                 f"Failed to communicate with {valid_scope} systemd: {exc}"
             ) from exc
+
+        fragment_path = str(props.get("FragmentPath") or "") or None
+        if fragment_path and os.path.isfile(fragment_path):
+            content = self._read_text(fragment_path)
+        else:
+            content = (
+                f"# No on-disk unit file found for '{normalized_name}'\n"
+                f"# FragmentPath: {fragment_path or '(empty)'}\n"
+                f"# This unit may be transient, generated, or masked in memory."
+            )
+            fragment_path = None
+
+        writable = drop_in_dir(normalized_name, valid_scope)
+        drop_ins = [
+            DropIn(
+                path=str(path),
+                content=self._read_text(str(path)),
+                editable=Path(path).parent == writable,
+            )
+            for path in props.get("DropInPaths") or []
+            if os.path.isfile(str(path))
+        ]
+        return UnitFileInfo(
+            service=normalized_name,
+            scope=valid_scope,
+            fragment_path=fragment_path,
+            content=content,
+            drop_ins=drop_ins,
+            override_path=str(writable / DEFAULT_DROP_IN),
+            need_daemon_reload=bool(props.get("NeedDaemonReload", False)),
+        )
+
+    @staticmethod
+    def _atomic_write(target: Path, content: str) -> None:
+        """Write ``content`` to ``target`` via a temp file and rename (0644)."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f".{target.name}.servicedeck-tmp")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o644)
+                handle.write(content if content.endswith("\n") else f"{content}\n")
+            os.replace(tmp, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
+
+    @staticmethod
+    def _permission_error(
+        action: str, normalized_name: str, target: Path
+    ) -> AuthorizationDeniedError:
+        return AuthorizationDeniedError(
+            action=action,
+            service_name=normalized_name,
+            reason=(
+                f"Permission denied writing to '{target}'. "
+                "Changing system unit files requires administrator access."
+            ),
+        )
+
+    async def write_override(
+        self, name: str, content: str, scope: str = "user", drop_in: str = DEFAULT_DROP_IN
+    ) -> OverrideResult:
+        """Write a drop-in override (``systemctl edit`` style) and reload systemd.
+
+        If the unit fails to load afterwards (``LoadState`` ``bad-setting`` or ``error``),
+        the previous drop-in is restored, systemd is reloaded again, and the error is raised.
+        Content with nothing but comments removes the drop-in instead.
+        """
+        valid_scope = validate_scope(scope)
+        normalized_name = normalize_service_name(name)
+        if not is_valid_drop_in_name(drop_in):
+            raise ServiceOperationError(
+                normalized_name,
+                "edit",
+                f"Invalid drop-in name '{drop_in}': use a plain file name ending in '.conf'.",
+            )
+
+        report = check_unit_text(content, drop_in=True)
+        if report.errors:
+            raise ServiceOperationError(normalized_name, "edit", " ".join(report.errors))
+
+        target = drop_in_dir(normalized_name, valid_scope) / drop_in
+        if report.empty:
+            removed = await self._remove_drop_ins(normalized_name, valid_scope, [target])
+            return OverrideResult(
+                service=normalized_name,
+                scope=valid_scope,
+                path=str(target),
+                removed=bool(removed),
+                load_state="loaded",
+                warnings=report.warnings,
+            )
+
+        try:
+            bus = await self._connection_manager.get_bus(valid_scope)
+            props = await self._get_unit_properties(bus, normalized_name, valid_scope, "edit")
+        except (PermissionDeniedError, ServiceNotFoundError, ServiceOperationError):
+            raise
+        except Exception as exc:
+            raise SystemdConnectionError(
+                f"Failed to communicate with {valid_scope} systemd: {exc}"
+            ) from exc
+        if props.get("LoadState") == "not-found":
+            raise ServiceNotFoundError(normalized_name)
+
+        previous: str | None = None
+        if target.is_file():
+            with contextlib.suppress(OSError):
+                previous = target.read_text(encoding="utf-8")
+
+        try:
+            self._atomic_write(target, content)
+        except PermissionError as exc:
+            raise self._permission_error("edit", normalized_name, target) from exc
+        except OSError as exc:
+            raise ServiceOperationError(
+                normalized_name, "edit", f"Failed to write '{target}': {exc}"
+            ) from exc
+
+        await self.reload_daemon(scope=valid_scope)
+        props = await self._get_unit_properties(bus, normalized_name, valid_scope, "edit")
+        load_state = str(props.get("LoadState") or "unknown")
+
+        if load_state in ("bad-setting", "error"):
+            load_error = props.get("LoadError") or []
+            detail = str(load_error[1]) if len(load_error) > 1 and load_error[1] else load_state
+            try:
+                if previous is None:
+                    target.unlink(missing_ok=True)
+                    with contextlib.suppress(OSError):
+                        target.parent.rmdir()
+                else:
+                    self._atomic_write(target, previous)
+            finally:
+                await self.reload_daemon(scope=valid_scope)
+            raise ServiceOperationError(
+                normalized_name,
+                "edit",
+                f"systemd rejected the override ({load_state}): {detail}. "
+                "The previous configuration was restored.",
+            )
+
+        logger.info("[%s] Wrote drop-in %s and reloaded daemon", valid_scope, target)
+        return OverrideResult(
+            service=normalized_name,
+            scope=valid_scope,
+            path=str(target),
+            removed=False,
+            load_state=load_state,
+            warnings=report.warnings,
+        )
+
+    async def _remove_drop_ins(
+        self, normalized_name: str, valid_scope: str, files: list[Path]
+    ) -> list[str]:
+        removed: list[str] = []
+        for path in files:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except PermissionError as exc:
+                raise self._permission_error("revert", normalized_name, path) from exc
+            except OSError as exc:
+                raise ServiceOperationError(
+                    normalized_name, "revert", f"Failed to remove '{path}': {exc}"
+                ) from exc
+            removed.append(str(path))
+        directory = drop_in_dir(normalized_name, valid_scope)
+        with contextlib.suppress(OSError):
+            directory.rmdir()  # only succeeds when empty
+        if removed:
+            await self.reload_daemon(scope=valid_scope)
+            logger.info("[%s] Removed drop-ins %s and reloaded daemon", valid_scope, removed)
+        return removed
+
+    async def revert_overrides(self, name: str, scope: str = "user") -> list[str]:
+        """Delete the ``*.conf`` drop-ins in the writable ``<unit>.d`` directory.
+
+        Vendor and runtime (``/run``) drop-ins are never touched, and the unit is not unmasked.
+        """
+        valid_scope = validate_scope(scope)
+        normalized_name = normalize_service_name(name)
+        directory = drop_in_dir(normalized_name, valid_scope)
+        try:
+            files = sorted(p for p in directory.glob("*.conf") if p.is_file())
+        except PermissionError as exc:
+            raise self._permission_error("revert", normalized_name, directory) from exc
+        return await self._remove_drop_ins(normalized_name, valid_scope, files)
 
     async def get_service_resources(self, name: str, scope: str = "user") -> ServiceResourceUsage:
         """Retrieve runtime resource metrics for an active service."""
@@ -723,13 +948,8 @@ class DbusSystemdAdapter:
             active_state = self._get_variant_value(unit_props.get("ActiveState"))
             is_active = active_state == "active"
 
-            raw_enter = unit_props.get("ActiveEnterTimestamp")
-            enter_val = getattr(raw_enter, "value", raw_enter) if raw_enter is not None else None
-            active_enter_timestamp = (
-                int(enter_val)
-                if isinstance(enter_val, (int, float)) and 0 < enter_val < self.UNAVAILABLE_COUNTER
-                else None
-            )
+            active_enter_timestamp = self._timestamp(unit_props.get("ActiveEnterTimestamp"))
+            state_change_timestamp = self._timestamp(unit_props.get("StateChangeTimestamp"))
 
             # 2. Query Service properties
             svc_reply = await bus.call(
@@ -757,6 +977,12 @@ class DbusSystemdAdapter:
             io_read = _clean_uint64(svc_props.get("IOReadBytes"))
             io_write = _clean_uint64(svc_props.get("IOWriteBytes"))
             tasks_current = _clean_uint64(svc_props.get("TasksCurrent"))
+
+            n_restarts = _clean_uint64(svc_props.get("NRestarts"))
+            result = self._get_variant_value(svc_props.get("Result")) or None
+            exec_main_code = _clean_uint64(svc_props.get("ExecMainCode"))
+            exec_main_status = _clean_uint64(svc_props.get("ExecMainStatus"))
+            exec_main_exit = self._timestamp(svc_props.get("ExecMainExitTimestamp"))
 
             main_pid_raw = svc_props.get("MainPID")
             main_pid_val = (
@@ -794,6 +1020,13 @@ class DbusSystemdAdapter:
                 process_count=process_count,
                 active_enter_timestamp_usec=active_enter_timestamp,
                 main_pid=main_pid,
+                active_state=active_state or "unknown",
+                n_restarts=n_restarts,
+                result=result,
+                exec_main_code=exec_main_code,
+                exec_main_status=exec_main_status,
+                exec_main_exit_timestamp_usec=exec_main_exit,
+                state_change_timestamp_usec=state_change_timestamp,
             )
 
         except (PermissionDeniedError, ServiceNotFoundError, ServiceOperationError):
@@ -855,13 +1088,11 @@ class DbusSystemdAdapter:
                 "create",
                 "Unit file content must contain both [Unit] and [Service] sections.",
             )
+        report = check_unit_text(content)
+        if report.errors:
+            raise ServiceOperationError(normalized_name, "create", " ".join(report.errors))
 
-        if valid_scope == "user":
-            target_dir = Path.home() / ".config" / "systemd" / "user"
-        else:
-            target_dir = Path("/etc/systemd/system")
-
-        target_file = target_dir / normalized_name
+        target_file = writable_unit_dir(valid_scope) / normalized_name
 
         if target_file.exists() and not overwrite:
             raise ServiceOperationError(
@@ -871,13 +1102,15 @@ class DbusSystemdAdapter:
             )
 
         try:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            target_file.write_text(content, encoding="utf-8")
+            self._atomic_write(target_file, content)
         except PermissionError as exc:
             raise AuthorizationDeniedError(
                 action="create",
                 service_name=normalized_name,
-                reason=f"Permission denied writing to '{target_file}'. Creating system services requires administrative privileges.",
+                reason=(
+                    f"Permission denied writing to '{target_file}'. "
+                    "Creating system services requires administrator access."
+                ),
             ) from exc
         except OSError as exc:
             raise ServiceOperationError(

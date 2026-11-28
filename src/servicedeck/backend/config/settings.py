@@ -49,6 +49,12 @@ class Settings(BaseSettings):
         description="Whether to pass ALLOW_INTERACTIVE_AUTHORIZATION on D-Bus calls, allowing "
         "desktop Polkit agents to prompt for authentication when required.",
     )
+    local_admin_idle_timeout: float = Field(
+        default=900.0,
+        ge=0,
+        description="Seconds without a privileged request after which the local administrator "
+        "(sudo root agent) session is dropped. 0 keeps it until dropped explicitly.",
+    )
 
 
 @lru_cache(maxsize=1)

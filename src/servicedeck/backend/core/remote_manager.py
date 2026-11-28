@@ -8,32 +8,32 @@ from typing import Any
 
 from servicedeck.backend.core.security_logger import log_remote_elevation
 from servicedeck.backend.exceptions import (
-    AuthenticationRequiredError,
-    AuthorizationDeniedError,
-    InvalidServiceNameError,
-    PermissionDeniedError,
     RemoteConnectionError,
     RemoteElevationRequiredError,
     ServiceDeckError,
-    ServiceNotFoundError,
-    ServiceOperationError,
-    SystemdConnectionError,
 )
 from servicedeck.backend.models.service import Service, ServiceEvent, ServiceResourceUsage
+from servicedeck.backend.models.unit_files import (
+    DEFAULT_DROP_IN,
+    OverrideResult,
+    UnitFileInfo,
+    override_result_from_dict,
+    unit_info_from_dict,
+)
 from servicedeck.backend.remote.channel import RemoteStream
 from servicedeck.backend.remote.connection import RemoteConnectionManager
 from servicedeck.backend.remote.device_config import DeviceConfigManager, RemoteDevice
+from servicedeck.backend.remote.errors import (
+    ELEVATION_CODES,
+    error_parts,
+    exception_from_response,
+)
 from servicedeck.backend.remote.key_setup import KeySetupResult, setup_key
 from servicedeck.backend.remote.keys import ServiceDeckKeyStore
 from servicedeck.backend.remote.known_hosts import HostKeyInfo
 from servicedeck.remote.models import ErrorDetail, HelloMessage, RequestMessage, ResponseMessage
 
 logger = logging.getLogger(__name__)
-
-#: Agent error codes that, for a system-scope call by the normal user, mean "needs root".
-_ELEVATION_CODES = frozenset(
-    {"AUTHENTICATION_REQUIRED", "AUTHORIZATION_DENIED", "PERMISSION_DENIED"}
-)
 
 
 class RemoteManager:
@@ -383,44 +383,20 @@ class RemoteManager:
         administrator access is needed, so it becomes ``RemoteElevationRequiredError``.
         """
         if not response.success:
-            err = response.error
-            code = err.code if err else "UNKNOWN"
-            msg = err.message if err else "Remote operation failed"
-            details = err.details if err else {}
-
-            if code == "SERVICE_NOT_FOUND":
-                svc_name = str(params.get("name", "")) if params else ""
-                raise ServiceNotFoundError(svc_name, message=msg)
-            if code == "INVALID_SERVICE_NAME":
-                svc_name = str(params.get("name", "")) if params else ""
-                raise InvalidServiceNameError(svc_name, reason=msg)
+            code, msg, details = error_parts(response)
             if (
                 not privileged
                 and (params or {}).get("scope") == "system"
-                and code in _ELEVATION_CODES
+                and code in ELEVATION_CODES
             ):
                 raise RemoteElevationRequiredError(
                     f"{msg} Administrator access on the remote host is required.",
                     details={
-                        **(details or {}),
+                        **details,
                         **self._elevation_details(device_id, method, params),
                     },
                 )
-            if code == "AUTHENTICATION_REQUIRED":
-                raise AuthenticationRequiredError(msg, details=details)
-            if code == "AUTHORIZATION_DENIED":
-                svc_name = str(params.get("name", "")) if params else None
-                raise AuthorizationDeniedError(action=method, service_name=svc_name)
-            if code == "PERMISSION_DENIED":
-                svc_name = str(params.get("name", "")) if params else None
-                raise PermissionDeniedError(action=method, service_name=svc_name, reason=msg)
-            if code == "SERVICE_OPERATION_FAILED":
-                svc_name = str(params.get("name", "")) if params else ""
-                raise ServiceOperationError(service_name=svc_name, operation=method, reason=msg)
-            if code == "SYSTEMD_CONNECTION_ERROR":
-                raise SystemdConnectionError(msg)
-
-            raise ServiceDeckError(msg, details=details)
+            raise exception_from_response(method, params, response)
 
         return response.result
 
@@ -515,6 +491,41 @@ class RemoteManager:
         result = await self._execute(device_id, "service.unit_file", params)
         return result.get("path"), result.get("content", "")
 
+    async def get_unit_info(
+        self, device_id: str, name: str, scope: str | None = None
+    ) -> UnitFileInfo:
+        """Fetch the unit's main file plus drop-ins from the remote host."""
+        params: dict[str, Any] = {"name": name}
+        if scope:
+            params["scope"] = scope
+        result = await self._execute(device_id, "service.unit_info", params)
+        return unit_info_from_dict(result)
+
+    async def write_override(
+        self,
+        device_id: str,
+        name: str,
+        content: str,
+        scope: str | None = None,
+        drop_in: str = DEFAULT_DROP_IN,
+    ) -> OverrideResult:
+        """Write a drop-in override on the remote host and reload its systemd."""
+        params: dict[str, Any] = {"name": name, "content": content, "drop_in": drop_in}
+        if scope:
+            params["scope"] = scope
+        result = await self._execute(device_id, "service.override.write", params)
+        return override_result_from_dict(result)
+
+    async def revert_overrides(
+        self, device_id: str, name: str, scope: str | None = None
+    ) -> list[str]:
+        """Remove a service's writable drop-ins on the remote host and reload."""
+        params: dict[str, Any] = {"name": name}
+        if scope:
+            params["scope"] = scope
+        result = await self._execute(device_id, "service.override.revert", params)
+        return [str(path) for path in result.get("removed", [])]
+
     async def get_service_resources(
         self, device_id: str, name: str, scope: str | None = None
     ) -> ServiceResourceUsage:
@@ -523,7 +534,8 @@ class RemoteManager:
         if scope:
             params["scope"] = scope
         result = await self._execute(device_id, "service.resources", params)
-        return ServiceResourceUsage(**result)
+        known = ServiceResourceUsage.__dataclass_fields__
+        return ServiceResourceUsage(**{k: v for k, v in result.items() if k in known})
 
     async def get_service_logs(
         self, device_id: str, name: str, lines: int = 200, scope: str | None = None

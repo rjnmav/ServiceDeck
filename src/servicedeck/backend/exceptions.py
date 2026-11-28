@@ -147,6 +147,13 @@ class RemoteElevationRequiredError(AuthenticationRequiredError):
     """
 
 
+class LocalElevationRequiredError(AuthenticationRequiredError):
+    """Raised when a system-scope unit file change on this computer needs administrator access.
+
+    The client should obtain it with ``POST /api/elevation`` (sudo password) and retry.
+    """
+
+
 class RemoteDeviceNotTrustedError(ServiceDeckError):
     """Raised when attempting to operate on a remote device that is not trusted/paired."""
 

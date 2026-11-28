@@ -10,6 +10,7 @@ from servicedeck.backend.app.application import create_app
 from servicedeck.backend.config.settings import Settings
 from servicedeck.backend.core.service_manager import ServiceManager
 from servicedeck.backend.exceptions import (
+    AuthorizationDeniedError,
     PermissionDeniedError,
     ServiceNotFoundError,
     ServiceOperationError,
@@ -21,6 +22,17 @@ from servicedeck.backend.models.service import (
     normalize_service_name,
     validate_scope,
 )
+from servicedeck.backend.models.unit_files import (
+    DEFAULT_DROP_IN,
+    DropIn,
+    OverrideResult,
+    UnitFileInfo,
+)
+from servicedeck.backend.models.unit_syntax import check_unit_text
+
+
+def _unit_dir(scope: str) -> str:
+    return "/etc/systemd/system" if scope == "system" else "/home/user/.config/systemd/user"
 
 
 class FakeSystemdAdapter:
@@ -32,8 +44,15 @@ class FakeSystemdAdapter:
         self.failing_operations: set[tuple[str, str]] = set()  # (operation, scope)
         self.calls: list[tuple[str, str, str]] = []  # (method, name, scope)
         self.unit_files: dict[tuple[str, str], tuple[str | None, str]] = {}
+        # Writable drop-ins per unit: {(scope, name): {"override.conf": content}}.
+        self.drop_ins: dict[tuple[str, str], dict[str, str]] = {}
+        # Vendor drop-ins (not editable): {(scope, name): [(path, content)]}.
+        self.vendor_drop_ins: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        # Content that makes the fake unit fail to load after reload (rollback tests).
+        self.bad_setting_marker: str = "BadSetting="
         self.service_logs: dict[tuple[str, str], str] = {}
         self.service_resources: dict[tuple[str, str], ServiceResourceUsage] = {}
+        self.restart_counts: dict[tuple[str, str], int] = {}
         # Live streams: scripted items, sent after the "ready" item, then the stream ends.
         self.watch_events: list[ServiceEvent] = []
         self.followed_logs: dict[tuple[str, str], list[str]] = {}
@@ -323,6 +342,72 @@ class FakeSystemdAdapter:
         content = f"[Unit]\nDescription={self._services[key].description}\n\n[Service]\nExecStart=/usr/bin/python3 -m {clean}\n"
         return path, content
 
+    async def get_unit_info(self, name: str, scope: str = "user") -> UnitFileInfo:
+        valid_scope = validate_scope(scope)
+        clean = normalize_service_name(name)
+        path, content = await self.get_unit_file(clean, scope=valid_scope)
+        self.calls.append(("get_unit_info", clean, valid_scope))
+        key = (valid_scope, clean)
+        directory = f"{_unit_dir(valid_scope)}/{clean}.d"
+        drop_ins = [DropIn(path=p, content=c) for p, c in self.vendor_drop_ins.get(key, [])]
+        drop_ins += [
+            DropIn(path=f"{directory}/{file}", content=text, editable=True)
+            for file, text in sorted(self.drop_ins.get(key, {}).items())
+        ]
+        return UnitFileInfo(
+            service=clean,
+            scope=valid_scope,
+            fragment_path=path,
+            content=content,
+            drop_ins=drop_ins,
+            override_path=f"{directory}/{DEFAULT_DROP_IN}",
+        )
+
+    def _check_write(self, action: str, clean: str, scope: str) -> None:
+        if (action, scope) in self.denied_operations:
+            # The real adapter raises this when writing the file fails with EACCES.
+            raise AuthorizationDeniedError(action=action, service_name=clean)
+        if (action, scope) in self.failing_operations:
+            raise ServiceOperationError(clean, action, "Simulated failure")
+
+    async def write_override(
+        self, name: str, content: str, scope: str = "user", drop_in: str = DEFAULT_DROP_IN
+    ) -> OverrideResult:
+        valid_scope = validate_scope(scope)
+        clean = normalize_service_name(name)
+        self.calls.append(("write_override", clean, valid_scope))
+        key = (valid_scope, clean)
+        if key not in self._services:
+            raise ServiceNotFoundError(clean)
+        report = check_unit_text(content, drop_in=True)
+        if report.errors:
+            raise ServiceOperationError(clean, "edit", " ".join(report.errors))
+        self._check_write("edit", clean, valid_scope)
+        path = f"{_unit_dir(valid_scope)}/{clean}.d/{drop_in}"
+        files = self.drop_ins.setdefault(key, {})
+        if report.empty:
+            removed = files.pop(drop_in, None) is not None
+            return OverrideResult(clean, valid_scope, path, removed=removed, load_state="loaded")
+        if self.bad_setting_marker in content:
+            raise ServiceOperationError(
+                clean,
+                "edit",
+                "systemd rejected the override (bad-setting): Simulated. "
+                "The previous configuration was restored.",
+            )
+        files[drop_in] = content
+        return OverrideResult(
+            clean, valid_scope, path, load_state="loaded", warnings=report.warnings
+        )
+
+    async def revert_overrides(self, name: str, scope: str = "user") -> list[str]:
+        valid_scope = validate_scope(scope)
+        clean = normalize_service_name(name)
+        self.calls.append(("revert_overrides", clean, valid_scope))
+        self._check_write("revert", clean, valid_scope)
+        files = self.drop_ins.pop((valid_scope, clean), {})
+        return [f"{_unit_dir(valid_scope)}/{clean}.d/{file}" for file in sorted(files)]
+
     async def get_service_resources(self, name: str, scope: str = "user") -> ServiceResourceUsage:
         valid_scope = validate_scope(scope)
         clean = normalize_service_name(name)
@@ -335,6 +420,7 @@ class FakeSystemdAdapter:
         if key not in self._services:
             raise ServiceNotFoundError(clean)
 
+        failed = self._services[key].active_state == "failed"
         return ServiceResourceUsage(
             service=clean,
             scope=valid_scope,
@@ -347,6 +433,12 @@ class FakeSystemdAdapter:
             process_count=1,
             active_enter_timestamp_usec=1710000000000000,
             main_pid=1234,
+            active_state=self._services[key].active_state,
+            n_restarts=self.restart_counts.get(key, 0),
+            result="exit-code" if failed else "success",
+            exec_main_code=1 if failed else 0,
+            exec_main_status=1 if failed else 0,
+            state_change_timestamp_usec=1710000000000000,
         )
 
     async def get_service_logs(self, name: str, lines: int = 200, scope: str = "user") -> str:
@@ -399,8 +491,7 @@ class FakeSystemdAdapter:
         clean = normalize_service_name(name)
         self.calls.append(("create_service", clean, valid_scope))
 
-        if ("create", valid_scope) in self.denied_operations:
-            raise PermissionDeniedError(action="create", service_name=clean)
+        self._check_write("create", clean, valid_scope)
 
         key = (valid_scope, clean)
         if not overwrite and key in self._services:

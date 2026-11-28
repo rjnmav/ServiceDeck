@@ -1,5 +1,7 @@
 """Service domain models returned by the ServiceDeck API client."""
 
+import signal
+import time
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -101,13 +103,56 @@ class ServiceOperationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class DropInFile:
+    """A drop-in file applied on top of a unit's main file."""
+
+    path: str
+    content: str
+    #: True when ServiceDeck can edit or remove it (it is in the scope's writable directory).
+    editable: bool = False
+
+    @property
+    def name(self) -> str:
+        return self.path.rsplit("/", 1)[-1]
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DropInFile":
+        return cls(
+            path=data.get("path", ""),
+            content=data.get("content", ""),
+            editable=bool(data.get("editable", False)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ServiceUnitFile:
-    """Represents a service unit file on disk."""
+    """Represents a service unit file on disk, plus the drop-ins applied to it."""
 
     service: str
     fragment_path: str | None
     content: str
     scope: str = "user"
+    drop_ins: tuple[DropInFile, ...] = ()
+    override_path: str | None = None
+    need_daemon_reload: bool = False
+
+    @property
+    def editable_drop_ins(self) -> tuple[DropInFile, ...]:
+        return tuple(d for d in self.drop_ins if d.editable)
+
+    @property
+    def override_content(self) -> str | None:
+        """Content of ``override_path`` if that drop-in exists."""
+        for drop_in in self.drop_ins:
+            if drop_in.path == self.override_path:
+                return drop_in.content
+        return None
+
+    def effective_text(self) -> str:
+        """The fragment followed by each drop-in, the way ``systemctl cat`` prints them."""
+        parts = [f"# {self.fragment_path or '(no unit file on disk)'}\n{self.content.rstrip()}"]
+        parts += [f"# {d.path}\n{d.content.rstrip()}" for d in self.drop_ins]
+        return "\n\n".join(parts) + "\n"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ServiceUnitFile":
@@ -117,12 +162,114 @@ class ServiceUnitFile:
             fragment_path=data.get("fragment_path"),
             content=data.get("content", ""),
             scope=data.get("scope", "user"),
+            drop_ins=tuple(DropInFile.from_dict(d) for d in data.get("drop_ins") or []),
+            override_path=data.get("override_path"),
+            need_daemon_reload=bool(data.get("need_daemon_reload", False)),
         )
 
 
 @dataclass(frozen=True, slots=True)
+class OverrideResult:
+    """Result of writing (or, for comment-only content, removing) a drop-in override."""
+
+    service: str
+    scope: str
+    path: str
+    removed: bool = False
+    load_state: str = "unknown"
+    warnings: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OverrideResult":
+        return cls(
+            service=data.get("service", ""),
+            scope=data.get("scope", "user"),
+            path=data.get("path", ""),
+            removed=bool(data.get("removed", False)),
+            load_state=data.get("load_state", "unknown"),
+            warnings=tuple(data.get("warnings") or ()),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RevertResult:
+    """Result of reverting a unit to its vendor configuration."""
+
+    service: str
+    scope: str
+    removed_paths: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RevertResult":
+        return cls(
+            service=data.get("service", ""),
+            scope=data.get("scope", "user"),
+            removed_paths=tuple(data.get("removed_paths") or ()),
+        )
+
+
+#: Exit status names, as ``systemctl status`` prints them (systemd.exec(5), "Process Exit Codes").
+EXIT_STATUS_NAMES: dict[int, str] = {
+    0: "SUCCESS",
+    1: "FAILURE",
+    2: "INVALIDARGUMENT",
+    3: "NOTIMPLEMENTED",
+    4: "NOPERMISSION",
+    5: "NOTINSTALLED",
+    6: "NOTCONFIGURED",
+    7: "NOTRUNNING",
+    200: "CHDIR",
+    201: "NICE",
+    202: "FDS",
+    203: "EXEC",
+    204: "MEMORY",
+    205: "LIMITS",
+    208: "STDIN",
+    209: "STDOUT",
+    210: "CHROOT",
+    216: "GROUP",
+    217: "USER",
+    226: "NAMESPACE",
+}
+
+#: ``ExecMainCode`` values (``CLD_*`` from waitid(2)).
+_EXIT_CODES = {1: "exited", 2: "killed", 3: "dumped"}
+
+
+def describe_exit(code: int | None, status: int | None) -> str | None:
+    """``systemctl status`` style text for the main process's last exit, e.g.
+    ``exited, status=203/EXEC`` or ``killed, signal=SEGV``. None if it has not exited."""
+    kind = _EXIT_CODES.get(code or 0)
+    if kind is None or status is None:
+        return None
+    if kind == "exited":
+        name = EXIT_STATUS_NAMES.get(status)
+        return f"exited, status={status}/{name}" if name else f"exited, status={status}"
+    try:
+        signal_name = signal.Signals(status).name.removeprefix("SIG")
+    except ValueError:
+        signal_name = str(status)
+    return f"{kind}, signal={signal_name}"
+
+
+def format_ago(seconds: float) -> str:
+    """Compact age such as ``42s``, ``5m``, ``3h 12m`` or ``2d 4h``."""
+    total = max(0, int(seconds))
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    if days:
+        return f"{days}d {hours}h" if hours else f"{days}d"
+    if hours:
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+    if minutes:
+        return f"{minutes}m"
+    return f"{secs}s"
+
+
+@dataclass(frozen=True, slots=True)
 class ServiceResources:
-    """Runtime resource consumption metrics for a service."""
+    """Runtime resource consumption metrics and health of a service."""
 
     service: str
     cpu_usage_nsec: int | None = None
@@ -134,6 +281,31 @@ class ServiceResources:
     active_enter_timestamp: int | None = None
     active_state: str = "inactive"
     scope: str = "user"
+    #: Automatic restarts by systemd (``NRestarts``); None on very old systemd.
+    n_restarts: int | None = None
+    #: Outcome of the last run: success, exit-code, signal, core-dump, timeout, ...
+    result: str | None = None
+    exec_main_code: int | None = None
+    exec_main_status: int | None = None
+    exec_main_exit_timestamp: int | None = None
+    #: Microseconds since epoch of the last ActiveState change.
+    state_change_timestamp: int | None = None
+
+    @property
+    def is_failed(self) -> bool:
+        return self.active_state == "failed"
+
+    @property
+    def last_exit(self) -> str | None:
+        """How the main process last ended, ``systemctl status`` style."""
+        return describe_exit(self.exec_main_code, self.exec_main_status)
+
+    def failed_for_seconds(self, now: float | None = None) -> float | None:
+        """Seconds since the unit failed, or None if it is not failed."""
+        if not self.is_failed or not self.state_change_timestamp:
+            return None
+        current = time.time() if now is None else now
+        return max(0.0, current - self.state_change_timestamp / 1_000_000)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ServiceResources":
@@ -149,6 +321,12 @@ class ServiceResources:
             active_enter_timestamp=data.get("active_enter_timestamp"),
             active_state=data.get("active_state", "inactive"),
             scope=data.get("scope", "user"),
+            n_restarts=data.get("n_restarts"),
+            result=data.get("result"),
+            exec_main_code=data.get("exec_main_code"),
+            exec_main_status=data.get("exec_main_status"),
+            exec_main_exit_timestamp=data.get("exec_main_exit_timestamp"),
+            state_change_timestamp=data.get("state_change_timestamp"),
         )
 
 

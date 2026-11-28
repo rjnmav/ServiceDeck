@@ -12,10 +12,12 @@ from servicedeck.backend.core.remote_manager import RemoteManager
 from servicedeck.backend.core.service_manager import ServiceManager
 from servicedeck.backend.exceptions import (
     RemoteConnectionError,
+    RemoteElevationRequiredError,
     ServiceNotFoundError,
     SSHAuthenticationError,
 )
 from servicedeck.backend.models.service import Service, ServiceResourceUsage
+from servicedeck.backend.models.unit_files import DropIn, OverrideResult, UnitFileInfo
 from servicedeck.backend.remote.device_config import RemoteDevice
 from servicedeck.remote.models import HelloMessage
 
@@ -45,6 +47,9 @@ def mock_remote_manager() -> MagicMock:
     mgr.unmask_service = AsyncMock()
     mgr.reload_daemon = AsyncMock()
     mgr.get_unit_file = AsyncMock()
+    mgr.get_unit_info = AsyncMock()
+    mgr.write_override = AsyncMock()
+    mgr.revert_overrides = AsyncMock()
     mgr.get_service_resources = AsyncMock()
     mgr.get_service_logs = AsyncMock()
     mgr.create_service = AsyncMock()
@@ -229,10 +234,82 @@ async def test_remote_daemon_reload(
 
 
 async def test_remote_unit_file(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:
-    mock_remote_manager.get_unit_file.return_value = ("/etc/systemd/system/ssh.service", "[Unit]\n")
-    resp = await remote_client.get("/api/remote/box1/services/ssh.service/unit-file")
+    mock_remote_manager.get_unit_info.return_value = UnitFileInfo(
+        service="ssh.service",
+        scope="system",
+        fragment_path="/usr/lib/systemd/system/ssh.service",
+        content="[Unit]\n",
+        drop_ins=[
+            DropIn(
+                path="/etc/systemd/system/ssh.service.d/override.conf",
+                content="[Service]\nNice=5\n",
+                editable=True,
+            )
+        ],
+        override_path="/etc/systemd/system/ssh.service.d/override.conf",
+    )
+    resp = await remote_client.get(
+        "/api/remote/box1/services/ssh.service/unit-file", params={"scope": "system"}
+    )
     assert resp.status_code == 200
-    assert resp.json()["fragment_path"] == "/etc/systemd/system/ssh.service"
+    body = resp.json()
+    assert body["fragment_path"] == "/usr/lib/systemd/system/ssh.service"
+    assert body["scope"] == "system"
+    assert body["drop_ins"][0]["editable"] is True
+    assert body["override_path"].endswith("ssh.service.d/override.conf")
+
+
+async def test_remote_write_override(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
+    mock_remote_manager.write_override.return_value = OverrideResult(
+        service="ssh.service",
+        scope="system",
+        path="/etc/systemd/system/ssh.service.d/override.conf",
+        load_state="loaded",
+    )
+    resp = await remote_client.put(
+        "/api/remote/box1/services/ssh.service/override",
+        params={"scope": "system"},
+        json={"content": "[Service]\nNice=5\n"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["load_state"] == "loaded"
+    mock_remote_manager.write_override.assert_awaited_once_with(
+        device_id="box1",
+        name="ssh.service",
+        content="[Service]\nNice=5\n",
+        scope="system",
+        drop_in="override.conf",
+    )
+
+
+async def test_remote_write_override_needs_elevation(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
+    mock_remote_manager.write_override.side_effect = RemoteElevationRequiredError(
+        "Administrator access on the remote host is required."
+    )
+    resp = await remote_client.put(
+        "/api/remote/box1/services/ssh.service/override",
+        params={"scope": "system"},
+        json={"content": "[Service]\nNice=5\n"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"] == "RemoteElevationRequiredError"
+
+
+async def test_remote_revert_overrides(
+    remote_client: AsyncClient, mock_remote_manager: MagicMock
+) -> None:
+    mock_remote_manager.revert_overrides.return_value = [
+        "/etc/systemd/system/ssh.service.d/override.conf"
+    ]
+    resp = await remote_client.delete(
+        "/api/remote/box1/services/ssh.service/override", params={"scope": "system"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["removed_paths"] == ["/etc/systemd/system/ssh.service.d/override.conf"]
 
 
 async def test_remote_resources(remote_client: AsyncClient, mock_remote_manager: MagicMock) -> None:

@@ -17,6 +17,7 @@ from servicedeck.backend.exceptions import (
     ServiceOperationError,
     SystemdConnectionError,
 )
+from servicedeck.backend.models.unit_files import DEFAULT_DROP_IN
 from servicedeck.remote.models import (
     RequestMessage,
     ResponseMessage,
@@ -213,6 +214,27 @@ class RequestDispatcher:
             self._require_param("name", params)
             path, content = await self._manager.get_unit_file(name=params["name"], scope=scope)
             return {"path": path, "content": content}
+
+        if method == "service.unit_info":
+            self._require_param("name", params)
+            info = await self._manager.get_unit_info(name=params["name"], scope=scope)
+            return dataclasses.asdict(info)
+
+        if method == "service.override.write":
+            self._require_param("name", params)
+            self._require_param("content", params)
+            result = await self._manager.write_override(
+                name=params["name"],
+                content=params["content"],
+                scope=scope,
+                drop_in=params.get("drop_in") or DEFAULT_DROP_IN,
+            )
+            return dataclasses.asdict(result)
+
+        if method == "service.override.revert":
+            self._require_param("name", params)
+            removed = await self._manager.revert_overrides(name=params["name"], scope=scope)
+            return {"removed": removed}
 
         if method == "service.resources":
             self._require_param("name", params)
